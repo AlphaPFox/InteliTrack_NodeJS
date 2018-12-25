@@ -46,9 +46,6 @@ build/Release
 # Dependency directories
 node_modules/
 
-# Credentials
-node_modules/
-
 # Functions modules
 functions/node_modules
 
