@@ -3,7 +3,6 @@ import * as admin from 'firebase-admin';
 import * as node_geocoder from 'node-geocoder';
 import * as geolocation from 'bscoords';
 import * as moment from 'moment';
-import { QueryDocumentSnapshot } from '@google-cloud/firestore';
 
 //Initialize firebase admin service
 admin.initializeApp();
@@ -408,12 +407,12 @@ exports.parseSMS = functions.firestore.document('SMS_Inbox/{messageId}').onCreat
             else if(sms_text.includes(`help me! ok!`))
             {
                //Confirm configuration enabled
-               console.info(`Successfully disabled SOS alert from tracker ` + this.get(`name`));
+               console.info(`Successfully disabled SOS alert from tracker ` + tracker.data().name);
             }
             else if(sms_text.includes(`low battery! ok!`))
             {
                //Confirm configuration enabled
-               console.info(`Successfully disabled low battery alert from tracker ` + this.get(`name`)); 
+               console.info(`Successfully disabled low battery alert from tracker ` + tracker.data().name); 
             }
             else if(sms_text.startsWith(`bat: `))
             {
@@ -421,7 +420,7 @@ exports.parseSMS = functions.firestore.document('SMS_Inbox/{messageId}').onCreat
                await confirmConfiguration(tracker, `StatusCheck`, true, sms_text);
                
                //Log info
-               console.info(`Successfully parsed status message from: ` + this.get(`name`));
+               console.info(`Successfully parsed status message from: ` + tracker.data().name);
             }
 
             //End method
@@ -430,7 +429,7 @@ exports.parseSMS = functions.firestore.document('SMS_Inbox/{messageId}').onCreat
          else
          {
             //Tracker not found error
-				throw {error: `Tracker with this phone number not found`, sms_sender: sms_message.sender};
+				throw { error: `Tracker with this phone number not found`, sms_sender: sms_message.sender };
          }
 		}
 	} 
@@ -888,7 +887,7 @@ async function insert_coordinates(tracker, coordinate_params, notification)
 	}	
 }
 
-async function confirmConfiguration(tracker: QueryDocumentSnapshot, configName: string, enabled: boolean, response: string)
+async function confirmConfiguration(tracker: FirebaseFirestore.QueryDocumentSnapshot, configName: string, enabled: boolean, response: string)
 {
    //Get configuration reference by name
    const config_reference = await tracker.ref.collection(`Configurations`).doc(configName).get();
@@ -926,7 +925,7 @@ async function confirmConfiguration(tracker: QueryDocumentSnapshot, configName: 
             config.status.step = `ERROR`;
             config.status.description = `Dispositivo indicou erro`;
          }
-         else if(configName == `IMEI`)
+         else if(configName === `IMEI`)
          {
             //Update tracker to save IMEI
             await tracker.ref.update(`imei`, response);
@@ -936,7 +935,7 @@ async function confirmConfiguration(tracker: QueryDocumentSnapshot, configName: 
             config.status.description = `Configuração confirmada pelo rastreador`;
             config.value = response;
          }
-         else if(configName == `StatusCheck`)
+         else if(configName === `StatusCheck`)
          {
             //Get battery level from SMS text
             let index = response.indexOf(`bat: `) + `bat: `.length;

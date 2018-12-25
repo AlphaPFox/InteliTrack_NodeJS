@@ -158,7 +158,7 @@ exports.parseSMS = functions.firestore.document('SMS_Inbox/{messageId}').onCreat
         // Get TCP message data
         const sms_message = docSnapshot.data();
         //Log data
-        console.info("Parsing SMS received", sms_message);
+        console.info(`Parsing SMS received`, sms_message);
         // Check if message is a delivery report
         if (sms_message.reference) {
             //Search for the most recent SMS with this reference
@@ -180,22 +180,22 @@ exports.parseSMS = functions.firestore.document('SMS_Inbox/{messageId}').onCreat
                 //Check delivery report status
                 if (sms_message.status === 0) {
                     //Log data
-                    console.info("Successfull delivery report parsed");
+                    console.info(`Successfull delivery report parsed`);
                     //Update configuration data
                     return firestore.doc(sms_sent.data().configuration).update({
-                        "status.step": "RECEIVED",
-                        "status.description": "Configuração recebida pelo rastreador",
-                        "status.datetime": admin.firestore.FieldValue.serverTimestamp()
+                        'status.step': `RECEIVED`,
+                        'status.description': `Configuração recebida pelo rastreador`,
+                        'status.datetime': admin.firestore.FieldValue.serverTimestamp()
                     });
                 }
                 else {
                     //Log data
-                    console.info("Failed delivery report parsed");
+                    console.info(`Failed delivery report parsed`);
                     //Update configuration data
                     return firestore.doc(sms_sent.data().configuration).update({
-                        "status.step": "ERROR",
-                        "status.description": "Configuração não recebida pelo rastreador",
-                        "status.datetime": admin.firestore.FieldValue.serverTimestamp()
+                        'status.step': `ERROR`,
+                        'status.description': `Configuração não recebida pelo rastreador`,
+                        'status.datetime': admin.firestore.FieldValue.serverTimestamp()
                     });
                 }
             }
@@ -205,10 +205,143 @@ exports.parseSMS = functions.firestore.document('SMS_Inbox/{messageId}').onCreat
             }
         }
         else {
-            //Log data
-            console.info("Text message successfully parsed");
-            //Remove SMS from inbox folder
-            return null;
+            //Search for tracker with the same phone number
+            const query = yield firestore
+                .collection(`Tracker`)
+                .where(`identification`, `==`, sms_message.sender)
+                .get();
+            //If tracker found
+            if (!query.empty) {
+                //Get tracker reference
+                const tracker = query.docs[0];
+                //Remove null bytes from string
+                const sms_text = sms_message.text.replace(/\0/g, ``).toLowerCase().trim();
+                //Check if text is response from a configuration
+                if (sms_text.startsWith(`begin `)) {
+                    //Confirm configuration enabled
+                    yield confirmConfiguration(tracker, `Begin`, true, sms_text);
+                }
+                else if (sms_text.startsWith(`time `)) {
+                    //Confirm configuration enabled
+                    yield confirmConfiguration(tracker, `TimeZone`, true, sms_text);
+                }
+                else if (!isNaN(sms_text)) {
+                    //Confirm configuration enabled
+                    yield confirmConfiguration(tracker, `IMEI`, true, sms_text);
+                }
+                else if (sms_text.startsWith(`reset `)) {
+                    //Confirm configuration enabled
+                    yield confirmConfiguration(tracker, `Reset`, true, sms_text);
+                }
+                else if (sms_text.startsWith(`apn `)) {
+                    //Confirm configuration enabled
+                    yield confirmConfiguration(tracker, `AccessPoint`, true, sms_text);
+                }
+                else if (sms_text.startsWith(`user`)) {
+                    //Confirm configuration enabled
+                    yield confirmConfiguration(tracker, `APNUserPass`, true, sms_text);
+                }
+                else if (sms_text.startsWith(`adminip `)) {
+                    //Confirm configuration enabled
+                    yield confirmConfiguration(tracker, `AdminIP`, true, sms_text);
+                }
+                else if (sms_text.startsWith(`gprs `)) {
+                    //Confirm configuration enabled
+                    yield confirmConfiguration(tracker, `GPRS`, true, sms_text);
+                }
+                else if (sms_text.startsWith(`less gprs on `)) {
+                    //Confirm configuration enabled
+                    yield confirmConfiguration(tracker, `LessGPRS`, true, sms_text);
+                }
+                else if (sms_text.startsWith(`less gprs off `)) {
+                    //Confirm configuration disabled
+                    yield confirmConfiguration(tracker, `LessGPRS`, false, sms_text);
+                }
+                else if (sms_text.startsWith(`sms `)) {
+                    //Confirm configuration enabled
+                    yield confirmConfiguration(tracker, `SMS`, true, sms_text);
+                }
+                else if (sms_text.startsWith(`admin `)) {
+                    //Confirm configuration enabled
+                    yield confirmConfiguration(tracker, `Admin`, true, sms_text);
+                }
+                else if (sms_text.startsWith(`noadmin `)) {
+                    //Confirm configuration disabled
+                    yield confirmConfiguration(tracker, `Admin`, false, sms_text);
+                }
+                else if (sms_text.includes(`phone number is not`)) {
+                    //Confirm configuration disabled
+                    yield confirmConfiguration(tracker, `Admin`, false, `ok`);
+                }
+                else if (sms_text.startsWith(`sleep off`)) {
+                    //Confirm configuration disabled
+                    yield confirmConfiguration(tracker, `Sleep`, false, sms_text);
+                }
+                else if (sms_text.startsWith(`sleep `)) {
+                    //Confirm configuration enabled
+                    yield confirmConfiguration(tracker, `Sleep`, true, sms_text);
+                }
+                else if (sms_text.startsWith(`noschework `)) {
+                    //Confirm configuration disabled
+                    yield confirmConfiguration(tracker, `Schedule`, false, sms_text);
+                }
+                else if (sms_text.startsWith(`schework `)) {
+                    //Confirm configuration enabled
+                    yield confirmConfiguration(tracker, `Schedule`, true, sms_text);
+                }
+                else if (sms_text.startsWith(`nofix`)) {
+                    //Confirm configuration disabled
+                    yield confirmConfiguration(tracker, `PeriodicUpdate`, false, sms_text);
+                }
+                else if (sms_text.startsWith(`noshock `)) {
+                    //Confirm configuration disabled
+                    yield confirmConfiguration(tracker, `Shock`, false, sms_text);
+                }
+                else if (sms_text.startsWith(`shock `)) {
+                    //Confirm configuration enabled
+                    yield confirmConfiguration(tracker, `Shock`, true, sms_text);
+                }
+                else if (sms_text.startsWith(`nomove `)) {
+                    //Confirm configuration disabled
+                    yield confirmConfiguration(tracker, `Move`, false, sms_text);
+                }
+                else if (sms_text.startsWith(`move `)) {
+                    //Confirm configuration enabled
+                    yield confirmConfiguration(tracker, `Move`, true, sms_text);
+                }
+                else if (sms_text.startsWith(`nospeed `)) {
+                    //Confirm configuration disabled
+                    yield confirmConfiguration(tracker, `Speed`, false, sms_text);
+                }
+                else if (sms_text.startsWith(`speed `)) {
+                    //Confirm configuration enabled
+                    yield confirmConfiguration(tracker, `Speed`, true, sms_text);
+                }
+                else if (sms_text.includes(`password err`)) {
+                    //Confirm configuration ERROR
+                    yield confirmConfiguration(tracker, `Begin`, true, sms_text);
+                }
+                else if (sms_text.includes(`help me! ok!`)) {
+                    //Confirm configuration enabled
+                    console.info(`Successfully disabled SOS alert from tracker ` + tracker.data().name);
+                }
+                else if (sms_text.includes(`low battery! ok!`)) {
+                    //Confirm configuration enabled
+                    console.info(`Successfully disabled low battery alert from tracker ` + tracker.data().name);
+                }
+                else if (sms_text.startsWith(`bat: `)) {
+                    //Status check configuration successfully applied
+                    yield confirmConfiguration(tracker, `StatusCheck`, true, sms_text);
+                    //Log info
+                    console.info(`Successfully parsed status message from: ` + tracker.data().name);
+                }
+                //End method
+                return null;
+            }
+            else {
+                //Tracker not found error
+                throw { error: `Tracker with this phone number not found`, sms_sender: sms_message.sender };
+            }
         }
     }
     catch (error) {
@@ -232,7 +365,7 @@ exports.buildConfiguration = functions.firestore.document('Tracker/{trackerId}/C
             //Get tracker password
             const tracker_password = tracker.data().password;
             //Check configuration status
-            if (configuration.status.step === "REQUESTED") {
+            if (configuration.status.step === `REQUESTED`) {
                 //Check configuration name
                 switch (configuration.name) {
                     case `Begin`:
@@ -326,9 +459,9 @@ exports.buildConfiguration = functions.firestore.document('Tracker/{trackerId}/C
                 //Set configuration status
                 configuration.status =
                     {
-                        step: "SCHEDULED",
+                        step: `SCHEDULED`,
                         command: command,
-                        description: "Aguardando para ser enviado ao rastreador",
+                        description: `Aguardando para ser enviado ao rastreador`,
                         datetime: admin.firestore.FieldValue.serverTimestamp(),
                         sms_reference: sms_reference.path,
                         finished: false
@@ -338,7 +471,7 @@ exports.buildConfiguration = functions.firestore.document('Tracker/{trackerId}/C
                 //Finish method and update configuration
                 return docSnapshot.after.ref.update(configuration);
             }
-            else if (configuration.status.step !== "SCHEDULED") {
+            else if (configuration.status.step !== `SCHEDULED`) {
                 //Update TRACKER PARAMS
                 return updateConfiguration(tracker, configuration);
             }
@@ -560,6 +693,70 @@ function insert_coordinates(tracker, coordinate_params, notification) {
         catch (error) {
             //Log error
             console.error('Error parsing TCP Message', error);
+        }
+    });
+}
+function confirmConfiguration(tracker, configName, enabled, response) {
+    return __awaiter(this, void 0, void 0, function* () {
+        //Get configuration reference by name
+        const config_reference = yield tracker.ref.collection(`Configurations`).doc(configName).get();
+        //If configuration found
+        if (config_reference.exists) {
+            //Get configuration data
+            const config = config_reference.data();
+            //Check if config status is currently pending
+            if (!config.status.finished) {
+                //Change configuration status
+                config.enabled = enabled;
+                config.status.finished = true;
+                config.status.datetime = admin.firestore.FieldValue.serverTimestamp();
+                //Check if configuration successfully applied
+                if (response.includes(`ok`)) {
+                    //Show success message to user
+                    config.status.step = `SUCCESS`;
+                    config.status.description = `Configuração ${enabled ? `ativada` : `desativada`} pelo rastreador`;
+                }
+                else if (response.includes(`password err`) || response.includes(`pwd fail`)) {
+                    //Show success message to user
+                    config.status.step = `ERROR`;
+                    config.status.description = `Dispositivo recusou a senha`;
+                }
+                else if (response.includes(`fail`)) {
+                    //Show success message to user
+                    config.status.step = `ERROR`;
+                    config.status.description = `Dispositivo indicou erro`;
+                }
+                else if (configName === `IMEI`) {
+                    //Update tracker to save IMEI
+                    yield tracker.ref.update(`imei`, response);
+                    //Show success message to user
+                    config.status.step = `SUCCESS`;
+                    config.status.description = `Configuração confirmada pelo rastreador`;
+                    config.value = response;
+                }
+                else if (configName === `StatusCheck`) {
+                    //Get battery level from SMS text
+                    let index = response.indexOf(`bat: `) + `bat: `.length;
+                    const battery_level = response.substring(index, response.substring(index).indexOf(`\n`) + index);
+                    //Get signal level from SMS text
+                    index = response.indexOf(`gsm: `) + `gsm: `.length;
+                    const signal_level = (parseInt(response.substring(index, response.substring(index).indexOf(`\n`) + index)) * 10 / 3).toFixed(0) + `%`;
+                    //Update value on firestore DB
+                    yield tracker.ref.update({ signalLevel: signal_level, batteryLevel: battery_level });
+                    //Send notification to users subscribed on this topic
+                    yield sendNotification(tracker.id, 'Notify_StatusCheck', {
+                        title: `Atualização de status`,
+                        content: `Bateria: ` + battery_level + ` / Sinal GSM: ` + signal_level,
+                        datetime: Date.now().toString()
+                    });
+                    //Show success message to user
+                    config.status.step = `SUCCESS`;
+                    config.status.description = `Configuração confirmada pelo rastreador`;
+                    config.value = response;
+                }
+                //Update configuration status on firestore DB
+                yield config_reference.ref.set(config);
+            }
         }
     });
 }
