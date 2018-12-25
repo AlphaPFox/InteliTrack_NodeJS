@@ -16,7 +16,7 @@ const com_port = process.argv[2];
 const server_name = process.argv[3];
 
 //Initialize Google services 
-const google_services = new Google_Services(`./credentials.json`);
+const google_services = new Google_Services(`./functions/credentials.json`);
 
 //Initialize TCP Parser
 const tcp_parser = new TCP_Module(tcp_port);
@@ -225,7 +225,7 @@ function monitorFirestore()
 		}, err => {
 		
 			//Log error
-			logger.error(`Error on tracker snapshot listener`, err);
+			logger.error(`Error on tracker snapshot listener ${err}`);
 
 			//Try to start method again
 			monitorFirestore();
