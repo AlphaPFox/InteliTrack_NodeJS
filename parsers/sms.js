@@ -199,7 +199,7 @@ class SMS_Parser extends EventEmitter
          modem.on('delivery', (delivery_report) =>
          {
             //Format phone number
-            delivery_report.sender = this.formatPhoneNumber(sms.delivery_report);
+            delivery_report.sender = this.formatPhoneNumber(delivery_report.sender);
 
             //Log output
             logger.debug("DELIVERY REPORT", delivery_report);

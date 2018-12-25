@@ -147,7 +147,7 @@ function monitorFirestore()
 			querySnapshot.docChanges.forEach(docChange => 
 			{			
 				//If tracker is inserted or updated
-				if(docChange.type === `added` && docChange.doc.data().command === `noshock123456`)
+				if(docChange.type === `added`)
 				{
 					//Get configuration data
 					const configuration_data = docChange.doc.data();
