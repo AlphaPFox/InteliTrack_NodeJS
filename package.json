@@ -1,0 +1,32 @@
+{
+  "name": "intelitrack",
+  "version": "1.0.0",
+  "description": "Application used to control tracking devices",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "Tracker",
+    "Tracking",
+    "GPS"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AlphaPFox/InteliTrack_NodeJS.git"
+  },
+  "author": "André Costa - DPF",
+  "license": "ISC",
+  "dependencies": {
+    "events": "^3.0.0",
+    "firebase-admin": "^6.0.0",
+    "firebase-functions": "^2.1.0",
+    "moment": "^2.23.0",
+    "net": "^1.0.2",
+    "node-geocoder": "^3.22.0",
+    "node-pdu": "^1.0.15",
+    "pdu": "^1.1.0",
+    "serialport": "^6.0.4",
+    "winston": "^3.1.0"
+  }
+}
