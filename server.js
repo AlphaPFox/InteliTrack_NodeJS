@@ -33,33 +33,24 @@ const sms_buffer = new Array();
 //Handle SMS comming from modem
 sms_parser.on(`data`, (sms_message) => 
 {
-	//If message is only delivery confirmation text
-	if(sms_message.text && sms_message.text.startsWith(`Torpedo SMS entregue`))
-	{
-		//Delete from modem memory
-		sms_parser.deleteMessage(sms_message);	
-	}
-	else
-	{
-		//Call method to save data on Firestore first
-		saveOnFirestore(`SMS_Inbox`, sms_message, 
-		(success) => 
-		{
-			//On success, log info
-			logger.info(`SMS Message -> Stored to Firestore DB at: ${success.writeTime.toDate()}`);
-		},
-		(error) =>
-		{
-			//On error, log message
-			logger.error(`SMS Message -> Error saving on Firestore DB: ${error}`);
+   //Call method to save data on Firestore first
+   saveOnFirestore(`SMS_Inbox`, sms_message, 
+   (success) => 
+   {
+      //On success, log info
+      logger.info(`SMS Message -> Stored to Firestore DB at: ${success.writeTime.toDate()}`);
+   },
+   (error) =>
+   {
+      //On error, log message
+      logger.error(`SMS Message -> Error saving on Firestore DB: ${error}`);
 
-			//Store message on local buffer
-			sms_buffer.push(sms_message);
-		});
-	
-		//Then delete from modem memory
-		sms_parser.deleteMessage(sms_message);	
-	}
+      //Store message on local buffer
+      sms_buffer.push(sms_message);
+   });
+
+   //Then delete from modem memory
+   sms_parser.deleteMessage(sms_message);	
 });
 
 //Handle data comming from TCP protocol
@@ -86,25 +77,7 @@ tcp_parser.on(`data`, (tcp_message) =>
 monitorFirestore();
 
 //Call method to check on local buffers every 30 seconds
-setInterval(monitorBuffers, 30000);
-
-function saveOnFirestore(collection, messageData, onSuccess, onError)
-{
-	//Append server name to sms message
-	messageData.server_name = server_name;
-
-	//Append server name to sms message
-	messageData.server_datetime = google_services.getTimestamp();
-
-	//Save SMS data on Firestore (parsed latter on Cloud Functions)
-	google_services
-		.getDB()
-		.collection(collection)
-		.doc()
-		.set(messageData)
-		.then(onSuccess)
-		.catch(onError);
-}
+monitorBuffers();
 
 function monitorBuffers()
 {
@@ -152,7 +125,10 @@ function monitorBuffers()
 			//On error, log message
 			logger.error(`[BUFFER] SMS Message -> Error saving on Firestore DB: ${error}`);
 		});
-	}
+   }
+   
+   //Call this method again in 30 secs
+   setTimeout(monitorBuffers, 30000);
 }
 
 //Get a real time updates from Firestore DB -> Tracker collection
@@ -254,4 +230,22 @@ function monitorFirestore()
 			//Try to start method again
 			monitorFirestore();
 		});
+}
+
+function saveOnFirestore(collection, messageData, onSuccess, onError)
+{
+	//Append server name to sms message
+	messageData.server_name = server_name;
+
+	//Append server name to sms message
+	messageData.server_datetime = google_services.getTimestamp();
+
+	//Save SMS data on Firestore (parsed latter on Cloud Functions)
+	google_services
+		.getDB()
+		.collection(collection)
+		.doc()
+		.set(messageData)
+		.then(onSuccess)
+		.catch(onError);
 }

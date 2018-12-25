@@ -176,16 +176,31 @@ class SMS_Parser extends EventEmitter
          //On SMS received
          modem.on('sms received', (sms) =>
          {
+            //Format phone number
+            sms.sender = this.formatPhoneNumber(sms.sender);
+
             //Log output
             logger.debug("SMS RECEIVED", sms);
 
-            //Call method to handle sms
-            this.emit('data', sms);
+            //If message is only delivery confirmation text
+            if(sms.text.startsWith(`Torpedo SMS entregue`))
+            {
+               //Delete from modem memory
+               this.deleteMessage(sms);	
+            }
+            else
+            {
+               //Call method to handle sms
+               this.emit('data', sms);
+            }
          });
          
          //On SMS delivery receipt received
          modem.on('delivery', (delivery_report) =>
          {
+            //Format phone number
+            delivery_report.sender = this.formatPhoneNumber(sms.delivery_report);
+
             //Log output
             logger.debug("DELIVERY REPORT", delivery_report);
 
