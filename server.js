@@ -10,6 +10,9 @@ const Google_Services = require(`./google`);
 const TCP_Module = require(`./parsers/tcp`);
 const SMS_Module = require(`./parsers/sms`);
 
+//Import client module
+const Client = require("./client")
+
 //Get process params
 const tcp_port = 5001;
 const com_port = process.argv[2];
@@ -30,6 +33,9 @@ const sms_parser = new SMS_Module(com_port);
 //Initialize local sms message buffer
 const sms_buffer = new Array();
 
+//Initialize clients array
+var clients = {};
+
 //Handle SMS comming from modem
 sms_parser.on(`data`, (sms_message) => 
 {
@@ -38,7 +44,7 @@ sms_parser.on(`data`, (sms_message) =>
    (success) => 
    {
       //On success, log info
-      logger.info(`SMS Message -> Stored to Firestore DB at: ${success.writeTime.toDate()}`);
+      logger.info(`SMS Message -> Stored to Firestore DB at: ${success.path}`);
    },
    (error) =>
    {
@@ -61,7 +67,7 @@ tcp_parser.on(`data`, (tcp_message) =>
 	(success) => 
 	{
 		//On success, log info
-		logger.info(`TCP Message -> Stored to Firestore DB at: ${success.writeTime.toDate()}`);
+		logger.info(`TCP Message -> Stored to Firestore DB at: ${success.path}`);
 	},
 	(error) =>
 	{
@@ -73,63 +79,28 @@ tcp_parser.on(`data`, (tcp_message) =>
 	});
 });
 
+//Handle client data comming from TCP protocol
+tcp_parser.on(`client`, (data, tcp_socket) => 
+{
+	//If client is not connected yet
+	if(!clients[data.source])
+	{
+		//Add new client to list
+		clients[data.source] = new Client(data.source, sms_parser);
+	}
+
+	//Update tcp_socket from client
+	clients[data.source].setConnection(tcp_socket);
+
+	//Call method to parse data
+	clients[data.source].parseData('tcp_data', data.content);
+});
+
 //Call method to check Firestore DB
 monitorFirestore();
 
 //Call method to check on local buffers every 30 seconds
 monitorBuffers();
-
-function monitorBuffers()
-{
-	//Log regular function
-	logger.debug(`Local buffers status: TCP -> ${tcp_buffer.length == 0 ? `No` : tcp_buffer.length} messages / SMS -> ${sms_buffer.length == 0 ? `No` : sms_buffer.length} messages`);
-
-	//If any messages available on TCP buffer
-	if(tcp_buffer.length > 0)
-	{
-		//Call method to save data on Firestore
-		saveOnFirestore(`TCP_Inbox`, tcp_buffer[0], 
-		(success) => 
-		{
-			//On success, log info
-			logger.info(`[BUFFER] TCP Message -> Stored to Firestore DB at: ${success.writeTime.toDate()}`);
-
-			//Remove message from buffer
-			tcp_buffer.shift();
-
-			//Call method again to check if there is more messages
-			monitorBuffers();
-		},
-		(error) =>
-		{
-			//On error, log message
-			logger.debug(`[BUFFER] TCP Message -> Firestore DB still not available: ${error}`);
-		});
-	}
-
-	//If any messages available on SMS buffer
-	if(sms_buffer.length > 0)
-	{
-		//Call method to save data on Firestore
-		saveOnFirestore(`SMS_Inbox`, sms_buffer[0], 
-		(success) => 
-		{
-			//On success, log info
-			logger.info(`[BUFFER] SMS Message -> Stored to Firestore DB at: ${success.writeTime.toDate()}`);
-
-			//Remove message from buffer
-			sms_buffer.shift();
-		},
-		(error) =>
-		{
-			//On error, log message
-			logger.error(`[BUFFER] SMS Message -> Error saving on Firestore DB: ${error}`);
-		});
-   }
-   
-   //Call this method again in 30 secs
-   setTimeout(monitorBuffers, 30000);
-}
 
 //Get a real time updates from Firestore DB -> Tracker collection
 function monitorFirestore()
@@ -212,8 +183,29 @@ function monitorFirestore()
 						}
 						else
 						{
-							//Error sending SMS
-							logger.error(`Error sending SMS command [${configuration_data.command}] sent to ${configuration_data.to}: ${result}`);
+							//Delete SMS from outbox folder
+							google_services.getDB().collection('SMS_Outbox').doc(docChange.doc.id).delete();
+
+							//Get configuration reference
+							const configuration_reference = google_services.getDB().doc(configuration_data.path);
+
+							//Update configuration
+							configuration_reference.update( 
+							{
+								"status.step": "ERROR",
+								"status.sms_reference": null, 
+								"status.datetime": google_services.getTimestamp(),
+								"status.description": "Falha no envio da configuração"
+							}).then(() =>
+							{
+								//Error sending SMS
+								logger.error(`Error sending SMS command [${configuration_data.command}] to ${configuration_data.to}: ${result} - Updated configuration status`);
+							})
+							.catch(error => 
+							{
+								//SMS sent, but failed to save on Firestore DB
+								logger.error(`Error sending SMS command [${configuration_data.command}] to ${configuration_data.to}: ${result} - Error updating configuration status ${error}`);
+							});
 						}
 					};
 
@@ -232,6 +224,44 @@ function monitorFirestore()
 		});
 }
 
+function monitorBuffers()
+{
+	//Call method to check on TCP Buffer
+	setInterval(checkBuffer, 30000, tcp_buffer, 'TCP_Inbox');
+
+	//Call method to check on SMS buffers 
+	setInterval(checkBuffer, 30000, sms_buffer, 'SMS_Inbox');
+}
+
+function checkBuffer(buffer, collection)
+{
+	//Log regular function
+	logger.debug(`[${collection}] -> ${buffer.length == 0 ? `No` : buffer.length} messages on buffer`);
+
+	//If any messages available on TCP buffer
+	if(buffer.length > 0)
+	{
+		//Call method to save data on Firestore
+		saveOnFirestore(collection, buffer[0], 
+		(success) => 
+		{
+			//On success, log info
+			logger.info(`[BUFFER] [${collection}] -> Stored to Firestore DB at: ${success.path}`);
+
+			//Remove message from buffer
+			buffer.shift();
+
+			//Call method again to check if there is more messages
+			checkBuffer(buffer, collection);
+		},
+		(error) =>
+		{
+			//On error, log message
+			logger.debug(`[BUFFER] [${collection}] -> Firestore DB still not available: ${error}`);
+		});
+	}
+}
+
 function saveOnFirestore(collection, messageData, onSuccess, onError)
 {
 	//Append server name to sms message
@@ -244,8 +274,7 @@ function saveOnFirestore(collection, messageData, onSuccess, onError)
 	google_services
 		.getDB()
 		.collection(collection)
-		.doc()
-		.set(messageData)
+		.add(messageData)
 		.then(onSuccess)
 		.catch(onError);
 }

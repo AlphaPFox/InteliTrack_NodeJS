@@ -1,8 +1,5 @@
 //Import GSM modem package
-var modem = require('../libs/modem')
-
-//Import date time parser
-const moment = require('moment');
+var modem = require('../libs/modem');
 
 //Import event emiter class
 const EventEmitter = require('events');
@@ -24,6 +21,9 @@ class SMS_Parser extends EventEmitter
 		//Initialize SMS outbox array
 		this._sms_outbox = [];
 
+		//Initialize client array
+		this._clients = [];
+
 		//Save com port
 		this._com_port = com_port;
 
@@ -36,7 +36,7 @@ class SMS_Parser extends EventEmitter
 		//Initialize modem configuration
 		this.configureModem(this.getModem());
 
-		//Initialize an periodic check for modem status (every 5)
+		//Initialize an periodic check for modem status (every 5 seconds)
 		setInterval(this.periodicCheck.bind(this), 5000);
   	}
 
@@ -80,6 +80,19 @@ class SMS_Parser extends EventEmitter
 	{
 		//Store SMS on send list
 		this._sms_outbox.push(sms_data);
+	}
+
+	//Append client to list
+	setClient(phoneNumber, client)
+	{
+		//Save client
+		this._clients[phoneNumber] = client;
+	}
+
+	//Get client by phone number
+	getClient(phoneNumber)
+	{
+		return this._clients[phoneNumber];
 	}
 
 	configureModem(modem)
@@ -188,11 +201,18 @@ class SMS_Parser extends EventEmitter
                //Delete from modem memory
                this.deleteMessage(sms);	
             }
-            else
-            {
-               //Call method to handle sms
-               this.emit('data', sms);
-            }
+				else 
+				{
+					//Check if this can be from a client request
+					if(this.getClient(sms.sender))
+					{
+						//Send message to be parse by client
+						this.getClient(sms.sender).parseData("sms_received", sms);
+					}
+
+					//Call method to handle sms
+					this.emit('data', sms);
+				}
          });
          
          //On SMS delivery receipt received
@@ -202,10 +222,17 @@ class SMS_Parser extends EventEmitter
             delivery_report.sender = this.formatPhoneNumber(delivery_report.sender);
 
             //Log output
-            logger.debug("DELIVERY REPORT", delivery_report);
+				logger.debug("DELIVERY REPORT", delivery_report);
+				
+				//Check if any client associated with this phone number
+				if(this.getClient(delivery_report.sender))
+            {
+					//Send message to be parse by client
+					this.getClient(delivery_report.sender).parseData("delivery_report", delivery_report);
+				}
 
-            //Call method to handle delivery report
-            this.emit('data', delivery_report);
+				//Call method to handle delivery report
+				this.emit('data', delivery_report);
 			});
 			
          //On data received from modem
@@ -262,7 +289,7 @@ class SMS_Parser extends EventEmitter
       else
       {
 			//Result error
-			callback(false, result);
+			callback(false, reference);
       }
     });
   }

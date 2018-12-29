@@ -28,163 +28,85 @@ geolocation.init({
 });
 
 // Cloud function: Parse data received from a TCP server
-exports.parseTCP = functions.firestore.document('TCP_Inbox/{messageId}').onCreate(async docSnapshot => 
+exports.parseTCP = functions.firestore.document('TCP_Inbox/{messageId}').onCreate(async snapshot => 
 {
 	// Get TCP message data
-	const tcp_message = docSnapshot.data();
+	const tcp_message = snapshot.data();
 
-	// Tracker not found, skip parsing
-	console.info('Function initialized, parsing TCP Message', tcp_message);
+	// Log message strucutre
+	console.info('Parsing TCP Message', tcp_message);
 
-	// Check protocol
-	if(tcp_message.type === 'COBAN_PROTOCOL')
+	try
 	{
-		try
+		// Try to find tracker associated with this tcp message source
+		const tracker = (await firestore.collection('Tracker').doc(tcp_message.source).get());
+
+		// Check if tracker retrieved
+		if(tracker.exists)
 		{
-			// Try to find tracker associated with this tcp message
-			const tracker = (await firestore.collection('Tracker').where('imei', '==', tcp_message.source).get()).docs[0];
-
-			// Check if tracker retrieved
-			if(!tracker)
+			// Check message type
+			if(tcp_message.type === 'CONNECTED')
 			{
-				// Tracker not found, skip parsing
-				console.error('TCP Message (COBAN PROTOCOL) received from unknown tracker.', tcp_message);
-
-				// Return error
-				return firestore.collection('TCP_Inbox').doc(docSnapshot.id).set({parseResult: 'Unknown tracker'}, {merge: true});
-			}
-			// Check if default tracker location message
-			else if(tcp_message.content.length > 10 && tcp_message.content[1] === 'tracker') 
-			{
-				// Get if GPS signal is fixed
-				if(tcp_message.content[4] === 'F')
-				{
-					// Tracker not found, skip parsing
-					console.info(`Parsing TCP Message (COBAN PROTOCOL) received from tracker: ${tracker.data().name}`, tcp_message);
-
-					//Parse datetime (ex.: 181106115734)
-					const datetime = moment.utc(tcp_message.content[2].substring(0, 6) + tcp_message.content[5].substring(0, 6), 'YYMMDDhhmmss').toDate();
-
-					//Parse coordinate from degrees/minutes to a GeoPoint
-					const coordinates = new admin.firestore.GeoPoint(parseCoordinate(tcp_message.content[7], tcp_message.content[8]), parseCoordinate(tcp_message.content[9], tcp_message.content[10]));
-					
-					//Parse speed
-					const speed = tcp_message.content[11];
-					
-					//Define coordinates params to be inserted/updated
-					const coordinate_params = 
-					{
-						type: 'GPS',
-						signalLevel: 'N/D',
-						batteryLevel: 'N/D',
-						datetime: datetime,
-						position: coordinates,
-						speed: speed
-					}
-
-					//Insert coordinates on DB
-					await insert_coordinates(tracker, coordinate_params, tcp_message.content[1]);
-				}
-				else
-				{
-					//Log data
-					console.info('Requesting geolocation from cell tower');
-
-					//Try to get position from nearest GSM cell tower
-					try
-					{
-						//Use google service for geolocation
-						const coords = await geolocation.google('724', getMNC(tracker.data().network), parseInt(tcp_message.content[7], 16), parseInt(tcp_message.content[9], 16));
-
-						//Geolocation results
-						console.info('Result', coords);
-
-						//Parse datetime (ex.: 181106115734)
-						const datetime = moment.utc(tcp_message.content[2], 'YYMMDDhhmmss').toDate();
-
-						//Create coordinates object
-						const coordinates = new admin.firestore.GeoPoint(coords.lat, coords.lon);
-
-						//Define coordinates params to be inserted/updated
-						const coordinate_params = 
-						{
-							type: 'GSM',
-							speed: 'N/D',
-							batteryLevel: tracker.data().batteryLevel,
-							signalLevel: tracker.data().signalLevel,
-							datetime: datetime,
-							position: coordinates
-						}
-						
-						//Insert coordinates on db with default notification
-						await insert_coordinates(tracker, coordinate_params, tcp_message.content[1]);
-					}
-					catch(error)
-					{
-						//Log data
-						console.error('Failed to geolocate GSM cell tower', error);
-
-						// Return error
-						return firestore.collection('TCP_Inbox').doc(docSnapshot.id).set({parseResult: 'Geolocation error', error: error}, {merge: true});
-					}
-				}
-			}
-			else if(tcp_message.content[1] === 'connected')
-			{
-				//End method by sending notification to users subscribed on this topic
+				//Send notification to users subscribed on this topic
 				await sendNotification(tracker.id, 'Notify_Available', {
 					title: 'Conexão GPRS',
 					content: 'Rastreador conectado',
 					expanded: 'O rastreador se conectou ao servidor Intelitrack',
 					datetime: Date.now().toString()
 				});
+
+				//Message parsed successfully, remove from TCP_Inbox
+				return snapshot.ref.delete();
+			}
+			else if (tcp_message.type === 'DISCONNECTED')
+			{
+				//Send notification to users subscribed on this topic
+				await sendNotification(tracker.id, 'Notify_Available', {
+					title: `Conexão finalizada`,
+					content: `O rastreador se desconectou do servidor`,
+					expanded: `A conexão com o servidor foi finalizada pelo dispositivo rastreador`,
+					datetime: Date.now().toString()
+				});
+
+				//Message parsed successfully, remove from TCP_Inbox
+				return snapshot.ref.delete();
+			}
+			else if(tcp_message.type === 'COBAN_PROTOCOL')
+			{
+				//Try to parse COBAN PROTOCOL message
+				await parseCobanProtocol(tracker, tcp_message);
+
+				//Message parsed successfully, remove from TCP_Inbox
+				return snapshot.ref.delete();
+			}
+			else if(tcp_message.type === 'TK103_PROTOCOL')
+			{
+				//Try to parse COBAN PROTOCOL message
+				await parseTK103Protocol(tracker, tcp_message);
+
+				//Message parsed successfully, remove from TCP_Inbox
+				return snapshot.ref.delete();
 			}
 			else
 			{
-				//Log error
-				console.error('Unknown COBAN PROTOCOL data structure', tcp_message);
-
-				// Return error
-				return firestore.collection('TCP_Inbox').doc(docSnapshot.id).set({parseResult: 'Unknown COBAN PROTOCOL data structure'}, {merge: true});
-			}		
-		} 
-		catch (error)
-		{
-			//Error running async functions
-			console.error('Error parsing message', error);
-
-			// Return error
-			return firestore.collection('TCP_Inbox').doc(docSnapshot.id).set({parseResult: 'Error parsing message', error: error}, {merge: true});
+				// Protocol not found
+				throw new Error(`Unknown message protocol from tracker ${tracker.data().name}`);
+			}
 		}
-	}
-	else if (tcp_message.type === 'DISCONNECT')
-	{
-		// Try to find tracker associated with this tcp message
-		const tracker = (await firestore.collection('Tracker').where('imei', '==', tcp_message.source).get()).docs[0];
-
-		// Check if tracker retrieved
-		if(tracker)
+		else
 		{
-			//End method by sending notification to users subscribed on this topic
-			await sendNotification(tracker.id, 'Notify_Available', {
-				title: `Conexão finalizada`,
-				content: `O rastreador se desconectou do servidor`,
-				expanded: `A conexão com o servidor foi finalizada pelo dispositivo rastreador`,
-				datetime: Date.now().toString()
-			});
+			// Tracker not found, skip parsing
+			throw new Error(`TCP Message received from unknown source ${tcp_message.source}`);
 		}
-	}
-	else
+	} 
+	catch(error)
 	{
 		// Log error
-		console.error('Unable to parse message, unknown protocol type', tcp_message);
+		console.error(`Unable to parse message: ${error.message}`);
 
 		// Return error
-		return firestore.collection('TCP_Inbox').doc(docSnapshot.id).set({parseResult: 'Unknown protocol type'}, {merge: true});
+		return snapshot.ref.set({parseResult: error.message}, {merge: true});
 	}
-
-	// Message parsed, delete from collection
-	return firestore.collection('TCP_Inbox').doc(docSnapshot.id).delete();
 });
 
 // Cloud function: Parse data received from a SMS server
@@ -222,38 +144,61 @@ exports.parseSMS = functions.firestore.document('SMS_Inbox/{messageId}').onCreat
 					received_time: admin.firestore.FieldValue.serverTimestamp()
 				}, {merge: true});
 
-				//Check delivery report status
-				if(sms_message.status === 0)
-				{
-					//Log data
-					console.info(`Successfull delivery report parsed`);
+				//Get configuration related to this message
+				const configuration = await firestore.doc(sms_sent.data().configuration).get()
 
-					//Update configuration data
-					return firestore.doc(sms_sent.data().configuration).update(
-					{ 
-						'status.step': `RECEIVED`,
-						'status.description': `Configuração recebida pelo rastreador`,
-						'status.datetime': admin.firestore.FieldValue.serverTimestamp()
-					});
+				//If configuration not confirmed yet
+				if(configuration.exists && configuration.data().status.step !== 'SUCCESS')
+				{
+					//Check delivery report status
+					if(sms_message.status === 0)
+					{
+						//Log data
+						console.info(`Delivery report parsed - Configuration delivered`, configuration.data());
+
+						//Update configuration data
+						return configuration.ref.update(
+						{ 
+							'status.step': `RECEIVED`,
+							'status.description': `Configuração recebida pelo rastreador`,
+							'status.datetime': admin.firestore.FieldValue.serverTimestamp()
+						});
+					}
+					else
+					{
+						//Log data
+						console.info(`Delivery report parsed - Configuration not delivered`, configuration.data());
+
+						//Update configuration data
+						return configuration.ref.update(
+						{ 
+							'status.step': `ERROR`,
+							'status.description': `Configuração não recebida pelo rastreador`,
+							'status.datetime': admin.firestore.FieldValue.serverTimestamp()
+						});
+					}
 				}
 				else
 				{
 					//Log data
-					console.info(`Failed delivery report parsed`);
+					console.info(`Received delivery report from a confirmed configuration`, configuration);
 
-					//Update configuration data
-					return firestore.doc(sms_sent.data().configuration).update(
-					{ 
-						'status.step': `ERROR`,
-						'status.description': `Configuração não recebida pelo rastreador`,
-						'status.datetime': admin.firestore.FieldValue.serverTimestamp()
-					});
+					//End method
+					return null;
 				}
+			}
+         else if(sms_message.client)
+         {
+            //Log data
+				console.info(`Received delivery report from client testing - Auth:  ${sms_message.client}`);
+				
+            //End method
+            return null;
 			}
 			else
 			{
 				//SMS not found error
-				throw {error: `SMS with reference supplied not found`, sms: sms_message};
+				throw new Error(`SMS with reference supplied not found`);
 			}
 		}
 		else
@@ -261,7 +206,7 @@ exports.parseSMS = functions.firestore.document('SMS_Inbox/{messageId}').onCreat
 			//Search for tracker with the same phone number
 			const query = await firestore
 				.collection(`Tracker`)
-				.where(`identification`, `==`, sms_message.sender)
+				.where(`phoneNumber`, `==`, sms_message.sender)
 				.get()
 
 			//If tracker found
@@ -337,7 +282,7 @@ exports.parseSMS = functions.firestore.document('SMS_Inbox/{messageId}').onCreat
             else if(sms_text.startsWith(`noadmin `))
             {
                //Confirm configuration disabled
-               await confirmConfiguration(tracker, `Admin`, false, sms_text);
+               await confirmConfiguration(tracker, `Admin`, false, "ok");
             }
             else if(sms_text.includes(`phone number is not`))
             {
@@ -368,6 +313,16 @@ exports.parseSMS = functions.firestore.document('SMS_Inbox/{messageId}').onCreat
             {
                //Confirm configuration disabled
                await confirmConfiguration(tracker, `PeriodicUpdate`, false, sms_text);
+				}
+            else if(sms_text.startsWith(`t0`))
+            {
+               //Confirm configuration disabled
+               await confirmConfiguration(tracker, `Timer`, true, sms_text);
+            }
+            else if(sms_text.startsWith(`notn`))
+            {
+               //Confirm configuration disabled
+               await confirmConfiguration(tracker, `Timer`, false, sms_text);
             }
             else if(sms_text.startsWith(`noshock `))
             {
@@ -407,29 +362,146 @@ exports.parseSMS = functions.firestore.document('SMS_Inbox/{messageId}').onCreat
             else if(sms_text.includes(`help me! ok!`))
             {
                //Confirm configuration enabled
-               console.info(`Successfully disabled SOS alert from tracker ` + tracker.data().name);
+               console.info(`Successfully disabled SOS alert from: ${tracker.data().name}`);
             }
             else if(sms_text.includes(`low battery! ok!`))
             {
                //Confirm configuration enabled
-               console.info(`Successfully disabled low battery alert from tracker ` + tracker.data().name); 
+               console.info(`Successfully disabled low battery alert from: ${tracker.data().name}`); 
             }
-            else if(sms_text.startsWith(`bat: `))
+            else if(sms_text.startsWith(`bat: `) || sms_text.startsWith(`gsm: `))
             {
                //Status check configuration successfully applied
                await confirmConfiguration(tracker, `StatusCheck`, true, sms_text);
                
                //Log info
-               console.info(`Successfully parsed status message from: ` + tracker.data().name);
-            }
+               console.info(`Successfully parsed status message from: ${tracker.data().name}`);
+				}
+				else if(sms_text.indexOf("cid:") >= 0)
+				{
+               //Log info
+					console.info(`Parsing SMS with GSM geolocation from: ${tracker.data().name}`);
+					
+					//Get LAC from SMS text
+					const lac_index = sms_text.indexOf("lac:") + "lac:".length;
+					const lac = sms_text.substring(lac_index, sms_text.substring(lac_index).indexOf(" ") + lac_index);
+					
+					//Get CID from SMS text
+					const cid_index = sms_text.indexOf("cid:") + "cid:".length;
+					const cid = sms_text.substring(cid_index, sms_text.substring(cid_index).indexOf(" ") + cid_index);
+
+					//Use google service for geolocation
+					const coords = await geolocation.google('724', getMNC(tracker.data().network), lac, cid);
+					
+					//Create coordinates object
+					const coordinates = new admin.firestore.GeoPoint(coords.lat, coords.lon);
+
+					//Create notification alert if available on this message
+					const alert_notification = buildNotification(sms_text.substring(0, sms_text.indexOf("!")));
+					
+					//Insert coordinates on db with default notification
+					await insert_coordinates(tracker,
+					{
+						type: 'GSM',
+						speed: 'N/D',
+						batteryLevel: tracker.data().batteryLevel,
+						signalLevel: tracker.data().signalLevel,
+						datetime: new Date(),
+						position: coordinates
+					}, alert_notification);
+				}
+				else if(sms_text.indexOf("lac:") >= 0)
+				{
+               //Log info
+					console.info(`Parsing SMS with GSM geolocation from: ${tracker.data().name}`);
+					
+					//Get LAC from SMS text
+					const lac_index = sms_text.indexOf("lac:") + "lac:".length;
+					const lac = sms_text.substring(lac_index, sms_text.substring(lac_index).indexOf(" ") + lac_index);
+					
+					//Get CID from SMS text
+					const cid_index = sms_text.indexOf(lac) + lac.length;
+					const cid = sms_text.substring(cid_index + 1, sms_text.substring(cid_index).indexOf("\n") + cid_index);
+
+					//Use google service for geolocation
+					const coords = await geolocation.google('724', getMNC(tracker.data().network), parseInt(lac, 16), parseInt(cid, 16));
+					
+					//Create coordinates object
+					const coordinates = new admin.firestore.GeoPoint(coords.lat, coords.lon);
+
+					//Create notification alert if available on this message
+					const alert_notification = buildNotification(sms_text.substring(0, sms_text.indexOf("!")));
+					
+					//Insert coordinates on db with default notification
+					await insert_coordinates(tracker,
+					{
+						type: 'GSM',
+						speed: 'N/D',
+						batteryLevel: tracker.data().batteryLevel,
+						signalLevel: tracker.data().signalLevel,
+						datetime: new Date(),
+						position: coordinates
+					}, alert_notification);
+				}
+				else if(sms_text.indexOf("lat") >= 0 && !sms_text.startsWith("last:"))
+				{
+					//Log info
+					console.info(`Parsing SMS with GPS position from: ${tracker.data().name}`);
+
+					//Get latitude from SMS text
+					let index = sms_text.indexOf("lat:") + "lat:".length;
+					const latitude = sms_text.substring(index, sms_text.substring(index).indexOf(" ") + index);
+
+					//Get longitude from SMS text
+					index = sms_text.indexOf("long:") + "long:".length;
+					const longitude = sms_text.substring(index, sms_text.substring(index).indexOf(" ") + index);
+
+					//Get speed from SMS text
+					index = sms_text.indexOf("speed:") + "speed:".length;
+					const speed = sms_text.substring(index, sms_text.substring(index).indexOf(" ") + index);
+
+					//Get speed from SMS text
+					index = sms_text.indexOf("bat:") + "bat:".length;
+					const bat = sms_text.substring(index, sms_text.substring(index).indexOf("\n") + index);
+					
+					//Create coordinates object
+					const coordinates = new admin.firestore.GeoPoint(parseFloat(latitude), parseFloat(longitude));
+
+					//Create notification alert if available on this message
+					const alert_notification = buildNotification(sms_text.substring(0, sms_text.indexOf("!")));
+
+					//Insert coordinates on db
+					await insert_coordinates(tracker, 
+					{
+						type: "GPS",
+						batteryLevel: bat,
+						signalLevel: tracker.data().signalLevel,
+						datetime: new Date(),
+						position: coordinates,
+						speed: speed
+					}, alert_notification);
+				}
+				else
+				{
+					//Log warning
+					console.error("Unable to parse message from TK102B model:  " + sms_text);
+				}
 
             //End method
             return null;
          }
-         else
+         else if(sms_message.client)
+         {
+            //Log data
+				console.info(`Received SMS from client testing - Auth:  ${sms_message.client}`);
+
+            //End method
+            return null;
+			}
+			else
          {
             //Tracker not found error
-				throw { error: `Tracker with this phone number not found`, sms_sender: sms_message.sender };
+				throw new Error(`Tracker with this phone number not found`);
          }
 		}
 	} 
@@ -455,12 +527,12 @@ exports.buildConfiguration = functions.firestore.document('Tracker/{trackerId}/C
 		//Get tracker data
 		const tracker = (await firestore.doc(`Tracker/${context.params.trackerId}`).get());
 
+		//Get configuration data
+		const configuration = docSnapshot.after.data();
+
 		//Check if document not deleted
 		if(docSnapshot.after.exists)
 		{
-			//Get configuration data
-			const configuration = docSnapshot.after.data();
-
 			//Get tracker password
 			const tracker_password = tracker.data().password;
 
@@ -534,6 +606,11 @@ exports.buildConfiguration = functions.firestore.document('Tracker/{trackerId}/C
 						//OPERATION CONFIG: Set position update interval
 						command = configuration.enabled ? `${configuration.value}${tracker_password}` : `nofix${tracker_password}`;
 						break;
+						
+					case `Timer`:
+						//OPERATION CONFIG: Set position update interval (TK103 model)
+						command = configuration.enabled ? `${configuration.value}${tracker_password}` : `notn${tracker_password}`;
+						break;
 
 					case `Sleep`:
 						//OPERATION CONFIG: Set sleep mode
@@ -566,42 +643,77 @@ exports.buildConfiguration = functions.firestore.document('Tracker/{trackerId}/C
 						break;
 				}
 
-				//Log data
-				console.info(`Scheduling SMS command [${configuration.name} -> '${command}] to tracker ${tracker.data().name}`);
-
-				//Create SMS to be sent by the server
-				const sms_reference = await firestore
-					.collection('SMS_Outbox')
-					.add(
-					{
-						command: command,
-						to: tracker.data().identification,
-						path: docSnapshot.after.ref.path,
-						datetime: admin.firestore.FieldValue.serverTimestamp()
-					})
-
-				//Set configuration status
-				configuration.status = 
+				//Check if phone number is available to send configuration
+				if(tracker.data().phoneNumber.replace(/\D/g,'').length === 11)
 				{
-					step: `SCHEDULED`,
-					command: command,
-					description: `Aguardando para ser enviado ao rastreador`,
-					datetime: admin.firestore.FieldValue.serverTimestamp(),
-					sms_reference: sms_reference.path,
-					finished: false
-				};
-				
+					//Log data
+					console.info(`Scheduling SMS command [${configuration.name} -> '${command}] to tracker ${tracker.data().name}`);
+
+					//Create SMS to be sent by the server
+					const sms_reference = await firestore
+						.collection('SMS_Outbox')
+						.add(
+						{
+							command: command,
+							to: tracker.data().phoneNumber,
+							path: docSnapshot.after.ref.path,
+							datetime: admin.firestore.FieldValue.serverTimestamp()
+						})
+
+					//Set configuration scheduled status
+					configuration.status = 
+					{
+						step: `SCHEDULED`,
+						description: `Aguardando para ser enviado ao rastreador`,
+						command: command,
+						datetime: admin.firestore.FieldValue.serverTimestamp(),
+						sms_reference: sms_reference.path,
+						finished: false
+					};
+				}
+				else
+				{
+					//Log data
+					console.info(`SMS command [${configuration.name} -> '${command}] to tracker ${tracker.data().name} not scheduled - No phone number available`);
+
+					//Set configuration error status
+					configuration.status = 
+					{
+						step: `ERROR`,
+						description: `Número de telefone inválido`,
+						command: command,
+						datetime: admin.firestore.FieldValue.serverTimestamp(),
+						finished: true
+					};
+				}
+								
 				//Log data
 				console.info(`Configuration ${configuration.name} parsed successfully.`, configuration);	
 
 				//Finish method and update configuration
 				return docSnapshot.after.ref.update(configuration);
 			}
-			else if(configuration.status.step !== `SCHEDULED`)
+			else if(docSnapshot.before.exists)
 			{
-				//Update TRACKER PARAMS
-				return updateConfiguration(tracker, configuration);
+				//if configuration was SCHEDULED before and now is now CONFIRMED OR CANCELED
+				if(docSnapshot.before.data().status.step === `SCHEDULED` && (configuration.status.step === `CONFIRMED` || configuration.status.step === `CANCELED`))
+				{
+					//Remove SMS from outbox collection
+					await firestore.doc(configuration.status.sms_reference).delete();	
+				}
+				
+				//if configuration is no longer scheduled
+				if(configuration.status.step !== `SCHEDULED`)
+				{
+					//Update configuration proggress
+					return updateConfiguration(tracker, configuration);
+				}
 			}
+		}
+		else if(configuration.status.step === `SCHEDULED`)
+		{
+			//Configuration deleted - remove SMS from outbox collection
+			return firestore.doc(configuration.status.sms_reference).delete();		
 		}
 		
 		//End method, no updates required
@@ -616,6 +728,154 @@ exports.buildConfiguration = functions.firestore.document('Tracker/{trackerId}/C
 		return null;
 	}
 });
+
+
+async function parseCobanProtocol(tracker, tcp_message)
+{
+	// Log data
+	console.info(`Parsing TCP Message (COBAN PROTOCOL) received from tracker: ${tracker.data().name}`);
+
+	// Check if default tracker location message
+	if(tcp_message.content.length > 10) 
+	{
+		// Get if GPS signal is fixed
+		if(tcp_message.content[4] === 'F')
+		{
+			//Parse datetime (ex.: 181106115734)
+			const datetime = moment.utc(tcp_message.content[2].substring(0, 6) + tcp_message.content[5].substring(0, 6), 'YYMMDDhhmmss').toDate();
+
+			//Parse coordinate from degrees/minutes to a GeoPoint
+			const coordinates = new admin.firestore.GeoPoint(parseCoordinate(tcp_message.content[7], tcp_message.content[8]), parseCoordinate(tcp_message.content[9], tcp_message.content[10]));
+			
+			//Parse speed
+			const speed = tcp_message.content[11];
+			
+			//Define coordinates params to be inserted/updated
+			const coordinate_params = 
+			{
+				type: 'GPS',
+				signalLevel: 'N/D',
+				batteryLevel: 'N/D',
+				datetime: datetime,
+				position: coordinates,
+				speed: speed
+			}
+
+			//Insert coordinates on DB
+			await insert_coordinates(tracker, coordinate_params, buildNotification(tcp_message.content[1]));
+		}
+		else if(tcp_message.content[4] === 'L')
+		{
+			//Log data
+			console.info('Requesting geolocation from cell tower');
+
+			//Use google service for geolocation
+			const coords = await geolocation.google('724', getMNC(tracker.data().network), parseInt(tcp_message.content[7], 16), parseInt(tcp_message.content[9], 16));
+
+			//Geolocation results
+			console.info('Result', coords);
+
+			//Parse datetime (ex.: 181106115734)
+			const datetime = moment.utc(tcp_message.content[2], 'YYMMDDhhmmss').toDate();
+
+			//Create coordinates object
+			const coordinates = new admin.firestore.GeoPoint(coords.lat, coords.lon);
+
+			//Define coordinates params to be inserted/updated
+			const coordinate_params = 
+			{
+				type: 'GSM',
+				speed: 'N/D',
+				batteryLevel: tracker.data().batteryLevel,
+				signalLevel: tracker.data().signalLevel,
+				datetime: datetime,
+				position: coordinates
+			}
+			
+			//Insert coordinates on db with default notification
+			await insert_coordinates(tracker, coordinate_params, buildNotification(tcp_message.content[1]));
+		}
+		else if(tcp_message.content[1] === 'OBD')
+		{
+			//Log data
+			console.info(`Received OBD message, appending to tracker ${tracker.data().name}`);
+
+			//Append ODB information to tracker
+			await tracker.ref.set({ vehicle_data:
+			{
+				odometer: tcp_message.content[3],
+				remaining_fuel: tcp_message.content[4],
+				average_fuel: tcp_message.content[5],
+				driving_time: tcp_message.content[6],
+				speed: tcp_message.content[7],
+				power_load: tcp_message.content[8],
+				water_temp: tcp_message.content[9],
+				throttle_percentage: tcp_message.content[10],
+				rpm: tcp_message.content[11],
+				battery: tcp_message.content[12],
+				dtc: tcp_message.content[13],
+				datetime: new Date()
+			}}, {merge: true})
+		}
+		else
+		{
+			//Throw error
+			throw new Error('Unknown COBAN PROTOCOL data structure: Unexpected message content.');
+		}
+	}
+	else
+	{
+		//Throw error
+		throw new Error('Unknown COBAN PROTOCOL data structure: Not enough fields.');
+	}
+}
+
+async function parseTK103Protocol(tracker, tcp_message)
+{
+	// Log data
+	console.info(`Parsing TCP Message (TK103 PROTOCOL) received from tracker: ${tracker.data().name}`);
+
+	// Check if default tracker location message (087075479117BR00181227A2304.5708S05412.4277W000.2132029000.00,00000000L00000000)
+	if(tcp_message.content.length > 50 && tcp_message.content.substring(13, 17) === 'BR00') 
+	{
+		//Parse datetime (ex.: 181106115734) 
+		const datetime = moment.utc(tcp_message.content.substring(17, 23) + tcp_message.content.substring(50, 56), 'YYMMDDhhmmss').toDate();
+
+		// Get if GPS signal is fixed 
+		if(tcp_message.content[23] === 'A')
+		{
+			//Parse coordinate from degrees/minutes to a GeoPoint
+			const coordinates = new admin.firestore.GeoPoint(parseCoordinate(tcp_message.content.substring(24, 33), tcp_message.content[33]), parseCoordinate(tcp_message.content.substring(34, 44), tcp_message.content[44]));
+			
+			//Parse speed
+			const speed = tcp_message.content.substring(45, 50);
+			
+			//Define coordinates params to be inserted/updated
+			const coordinate_params = 
+			{
+				type: 'GPS',
+				signalLevel: 'N/D',
+				batteryLevel: 'N/D',
+				datetime: datetime,
+				position: coordinates,
+				speed: speed
+			}
+
+			//Insert coordinates on DB
+			await insert_coordinates(tracker, coordinate_params, buildNotification(tcp_message.content.substring(13, 17)));
+		}
+		else
+		{
+			//Log data
+			console.info('TK103 PROTOCOL message: GPS not fixed.');
+		}
+	}
+	else
+	{
+		//Throw error
+		throw new Error('Unknown TK103 PROTOCOL data structure');
+	}
+}
 
 // Update configuration progress 
 async function updateConfiguration(tracker: FirebaseFirestore.DocumentSnapshot, configuration: FirebaseFirestore.DocumentData) : Promise<FirebaseFirestore.WriteResult>
@@ -645,6 +905,9 @@ async function updateConfiguration(tracker: FirebaseFirestore.DocumentSnapshot, 
 		//Get current pending count
 		let currentPending = configurations.docs.length;
 
+		//Flag indicating if any error ocurred
+		let config_error = false;
+
 		//For each pending configuration
 		configurations.forEach(config => {
 
@@ -663,19 +926,65 @@ async function updateConfiguration(tracker: FirebaseFirestore.DocumentSnapshot, 
 				case 'CONFIRMED':
 					currentPending -= 1;
 					break;
+				case 'ERROR':
+					config_error = true;
+					break;
 			}
 		})
 
 		//Log data
 		console.info(`Updating configuration ${configuration.name} on tracker ${tracker.id}: Status: ${configuration.status.step}`);
 
-		//Update current configuration description
-		configProgress.description = configuration.description;
-		configProgress.status = configuration.status.description;
+		//Update current configuration datetime
 		configProgress.datetime = configuration.status.datetime;
-				
+
 		//Calculate configuration progress
 		configProgress.progress = Math.ceil((configProgress.pending - currentPending )* 100 / configProgress.pending);
+
+		//If configuration was received by the tracker
+		if(configuration.status.step === "RECEIVED")
+		{
+			//Send notification to users subscribed on this topic
+			await sendNotification(tracker.id, 'Notify_Available', {
+				title: `Notificação de disponibilidade`,
+				content: `Confirmado o recebimento de SMS`,
+				expanded: `O rastreador recebeu a configuração enviada por mensagem de texto`,
+				datetime: Date.now().toString()
+			});
+		}
+		else if(configuration.status.step === "ERROR")
+		{
+			//Send notification to users subscribed on this topic
+			await sendNotification(tracker.id, 'Notify_Available', {
+				title: `Rastreador indisponível`,
+				content: `A configuração não pode ser entregue ao rastreador`,
+				expanded: `Dispositivo não disponível para o recebimento de solicitações`,
+				datetime: Date.now().toString()
+			});
+		}
+
+		//Check configuration status
+		if(config_error)
+		{
+			//Configuration error
+			configProgress.step = "ERROR";
+			configProgress.description = configuration.description;
+			configProgress.status = configuration.status.description;
+		}
+		else if (currentPending === 0)
+		{
+			//Configuration success
+			configProgress.step = "SUCCESS";
+			configProgress.description = configProgress.pending === 1 ? configuration.description : "Configuração finalizada";
+			configProgress.status = "Processo realizado com sucesso";
+		}
+		else
+		{
+			//Configuration in progress
+			configProgress.step = "PENDING";
+			configProgress.description = configuration.description;
+			configProgress.status = configuration.status.description;
+		}
 
 		//Return update on tracker
 		return tracker.ref.set({lastConfiguration: configProgress}, {merge: true});
@@ -690,44 +999,8 @@ async function updateConfiguration(tracker: FirebaseFirestore.DocumentSnapshot, 
 	}
 }
 
-// Parse degree coordinate value (format: '2304.56556', 'S'), return as decimal -23.4204
-function parseCoordinate(value, orientation)
-{
-	//Get degrees and minutes from value
-	const degrees = parseInt(value.substring(0, value.indexOf('.') - 2));
-	const minutes = parseFloat(value.substring(value.indexOf('.') - 2));
-
-	// Convert to decimal
-	let decimal = degrees + minutes / 60;
-
-	// Check orientation
-	if(orientation === 'S' || orientation === 'W')
-	{
-		// Negative for south or west
-		decimal = decimal * -1;
-	}
-
-	return decimal;
-}
-
-// Calculate the distance between to GeoPoints
-function getDistance(coordinates1, coordinates2) 
-{
-	// Math.PI / 180
-	const p = 0.017453292519943295;
-
-	// Calculate distance
-	const a = 0.5 - 
-				Math.cos((coordinates2.latitude - coordinates1.latitude) * p)/2 + 
-				Math.cos(coordinates1.latitude * p) * Math.cos(coordinates2.latitude * p) * 
-				(1 - Math.cos((coordinates2.longitude - coordinates1.longitude) * p))/2;
-
-	// 2 * R; R = 6371 km
-	return 12742000 * Math.asin(Math.sqrt(a)); 
-}
-
 // Insert parsed coordinates to corresponding tracker collection
-async function insert_coordinates(tracker, coordinate_params, notification)
+async function insert_coordinates(tracker: FirebaseFirestore.QueryDocumentSnapshot, coordinate_params, alert_notification)
 {
 	try
 	{
@@ -791,15 +1064,15 @@ async function insert_coordinates(tracker, coordinate_params, notification)
 				//Log info
 				console.info(`Successfully parsed location message from: ${tracker.data().name} - Coordinate inserted`);
 
-				//If this is a new coordinate
-				if(new_coordinate)
+				//If this is a new coordinate and no alert notification
+				if(new_coordinate && !alert_notification)
 				{
 					//Sending notification to users subscribed on this topic
 					await sendNotification(tracker.id, 'Notify_Move', 
 					{
-						title: (previousCoordinate === null ? 'Posição do rastreador disponível' : 'Notificação de movimentação'),
-						content: (coordinate_params.type === 'GSM' ? '(Sinal de GPS fraco, localização aproximada)' : coordinate_params.address),
-						coordinates: (coordinate_params.type === 'GSM' ? '(GSM)_' : `(GPS)_${coordinate_params.position.latitude},${coordinate_params.position.longitude}`),
+						title: `${previousCoordinate === null ? 'Posição do rastreador disponível' : 'Notificação de movimentação'}`,
+						content: `${coordinate_params.type === 'GSM' ? '(Sinal de GPS fraco, localização aproximada)' : coordinate_params.address}`,
+						coordinates: `${coordinate_params.type === 'GSM' ? '(GSM)_' : '(GPS)_'}${coordinate_params.position.latitude},${coordinate_params.position.longitude}`,
 						datetime: Date.now().toString()
 					});
 				}
@@ -829,22 +1102,27 @@ async function insert_coordinates(tracker, coordinate_params, notification)
 				.doc(previousCoordinate.id)
 				.update(coordinate_params);
 
-			//If this is a new coordinateas
-			if(new_coordinate)
+			//If this is a new coordinates and no alert notification
+			if(new_coordinate && !alert_notification)
 			{
 				//Send notification to users subscribed on this topic
 				await sendNotification(tracker.id, 'Notify_Stopped', {
 					title: 'Notificação de permanência',
-					content: (coordinate_params.type === 'GSM' ? '(Sinal de GPS fraco, localização aproximada)' : 'Rastreador permanece na mesma posição.'),
-					coordinates: (coordinate_params.type === 'GSM' ? '(GSM)_' : `(GPS)_${coordinate_params.position.latitude},${coordinate_params.position.longitude}`),
+					content: `${coordinate_params.type === 'GSM' ? '(Sinal de GPS fraco, localização aproximada)' : 'Rastreador permanece na mesma posição.'}`,
+					coordinates: `${coordinate_params.type === 'GSM' ? '(GSM)_' : '(GPS)_'}${coordinate_params.position.latitude},${coordinate_params.position.longitude}`,
 					datetime: Date.now().toString()
 				});
-
-				//Append datetime to update tracker params
 			}
 			
 			//Log info
 			console.info(`Successfully parsed location message from: ${tracker.data().name} - Coordinate updated`);
+		}
+
+		//If alert notification available
+		if(alert_notification)
+		{
+			//Send notification to users subscribed on this topic
+			await sendNotification(tracker.id, 'Notify_Alert', alert_notification);
 		}
 
 		//If new coordinate
@@ -857,27 +1135,14 @@ async function insert_coordinates(tracker, coordinate_params, notification)
 			await firestore
 				.collection('Tracker')
 				.doc(tracker.id)
-				.set(
-				{
-					lastCoordinate: 
-					{
-						type: coordinate_params.type,
-						location: coordinate_params.position,
-						datetime: datetime
-					},
-					lastUpdate: datetime
-				}, 
-				{ merge: true })
-				.then(() =>
-				{
-					//Log error
-					console.info('Updated lastCoordinate from Tracker on DB');
-				})
-				.catch((error) =>
-				{
-					//Log error
-					console.error('Error updating tracker on DB', error);
-				});
+				.set({ lastCoordinate: { type: coordinate_params.type, location: coordinate_params.position, datetime: datetime }, lastUpdate: datetime}, { merge: true })
+
+			//Check if there is any pending configurations on this tracker
+			if(tracker.data().lastConfiguration && tracker.data().lastConfiguration.step === "PENDING" && tracker.data().model === "tk102")
+			{
+				//Confirm location configuration
+				await confirmConfiguration(tracker, "PeriodicUpdate", true, "ok");
+			}
 		}
 	} 
 	catch (error)
@@ -906,8 +1171,7 @@ async function confirmConfiguration(tracker: FirebaseFirestore.QueryDocumentSnap
          config.status.finished = true;
          config.status.datetime = admin.firestore.FieldValue.serverTimestamp();
 
-         //Check if configuration successfully applied
-         if(response.includes(`ok`))
+			if(response.includes(`ok`))
          {
             //Show success message to user
             config.status.step = `SUCCESS`;
@@ -924,8 +1188,10 @@ async function confirmConfiguration(tracker: FirebaseFirestore.QueryDocumentSnap
             //Show success message to user
             config.status.step = `ERROR`;
             config.status.description = `Dispositivo indicou erro`;
-         }
-         else if(configName === `IMEI`)
+			}
+			
+			//Check for configurations IMEI or StatusCheck
+         if(configName === `IMEI`)
          {
             //Update tracker to save IMEI
             await tracker.ref.update(`imei`, response);
@@ -937,13 +1203,35 @@ async function confirmConfiguration(tracker: FirebaseFirestore.QueryDocumentSnap
          }
          else if(configName === `StatusCheck`)
          {
-            //Get battery level from SMS text
-            let index = response.indexOf(`bat: `) + `bat: `.length;
-            const battery_level = response.substring(index, response.substring(index).indexOf(`\n`) + index);
+				//Initialize battery and signal level
+				let index = 0;
+				let battery_level = "N/D";
+				let signal_level = "N/D";
 
-            //Get signal level from SMS text
-            index = response.indexOf(`gsm: `) + `gsm: `.length;
-            const signal_level = (parseInt(response.substring(index, response.substring(index).indexOf(`\n`) + index))*10/3).toFixed(0) + `%`;
+				//Parse for tk102 models
+				if(tracker.data().model === "tk102")
+				{
+					//Get battery level from SMS text
+					index = response.indexOf(`bat: `) + `bat: `.length;
+					battery_level = response.substring(index, response.substring(index).indexOf(`\n`) + index);
+
+					//Get signal level from SMS text
+					index = response.indexOf(`gsm: `) + `gsm: `.length;
+					signal_level = (parseInt(response.substring(index, response.substring(index).indexOf(`\n`) + index))*10/3).toFixed(0) + `%`;
+				}
+				else if(tracker.data().model === "tk103")
+				{
+					//Get signal level from SMS text
+					index = response.indexOf("gsm: ") + "gsm: ".length;
+					signal_level = response.substring(index + 1, response.substring(index).indexOf(" ") + index);
+
+					//Get battery level from SMS text
+					index = response.indexOf("battery: ") + "battery: ".length;
+					battery_level = response.substring(index + 1, response.length);
+
+					//Fix battery level if battery is 100%
+					battery_level = battery_level === "00%" ? "100%" : battery_level;
+				}
 
             //Update value on firestore DB
             await tracker.ref.update({ signalLevel: signal_level, batteryLevel: battery_level });
@@ -959,16 +1247,29 @@ async function confirmConfiguration(tracker: FirebaseFirestore.QueryDocumentSnap
             config.status.step = `SUCCESS`;
             config.status.description = `Configuração confirmada pelo rastreador`;
             config.value = response;
-         }
+			}
+
+			//Log data
+			console.info(`Confirmed configuration ${configName} on tracker ${tracker.data().name}`, config);
 
          //Update configuration status on firestore DB
          await config_reference.ref.set(config);
-      }
+		}
+		else
+		{
+			//Log data
+			console.info(`Configuration ${configName} already confirmed on tracker ${tracker.data().name}`, config);
+		}
    }
+	else
+	{
+		//Log data
+		console.error(`Configuration ${configName} not found on tracker ${tracker.data().name}`);
+	}
 }
 
 // Send Firebase Cloud Message to a specific topic
-async function sendNotification(tracker_id, channel, params)
+async function sendNotification(tracker_id: string, channel: string, params)
 {
 	// Save tracker ID on param data
 	params.id = tracker_id;
@@ -997,6 +1298,119 @@ async function sendNotification(tracker_id, channel, params)
 		console.error(`Error sending message to topic ${topic}`, error);
 	});
 }
+
+// Parse degree coordinate value (format: '2304.56556', 'S'), return as decimal -23.4204
+function buildNotification(messageType: string)
+{
+	//Get notification type
+	switch(messageType)
+	{
+		case 'help me':
+			return {
+				title: `Alerta de S.O.S`,
+				content: `Pressionado o botão S.O.S. no rastreador`,
+				datetime: Date.now().toString()
+			};
+			
+		case 'move':
+			return {
+				title: `Alerta de movimentação`,
+				content: `Movimentação além do limite determinado.`,
+				datetime: Date.now().toString()
+			};	
+
+		case 'speed':
+			return {
+				title: `Alerta de velocidade`,
+				content: `Velocidade além do limite determinado.`,
+				datetime: Date.now().toString()
+			};	
+
+		case 'sensor alarm':
+		case 'shock':
+			return {
+				title: `Alerta de vibração`,
+				content: `Detectada vibração no dispositivo rastreador`,
+				datetime: Date.now().toString()
+			};
+			
+		case 'low battery':
+			return {
+				title: `Alerta de bateria fraca`,
+				content: `Bateria do dispositivo rastreador em nível baixo`,
+				datetime: Date.now().toString()
+			};
+								
+		case 'ac alarm':
+		case 'power alarm':
+			return {
+				title: `Alerta de energia`,
+				content: `Dispositivo desconectado da fonte de energia externa`,
+				datetime: Date.now().toString()
+			};		
+
+		case 'acc on':
+			return {
+				title: `Alerta de motor ligado`,
+				content: `O motor do veículo foi ligado`,
+				datetime: Date.now().toString()
+			};
+
+		case 'acc alarm':
+			return {
+				title: `Alerta de motor`,
+				content: `O motor do veículo está em funcionamento`,
+				datetime: Date.now().toString()
+			};
+			
+		case 'acc off':
+			return {
+				title: `Alerta de motor desligado`,
+				content: `O motor do veículo foi desligado`,
+				datetime: Date.now().toString()
+			};
+		
+		default:
+			return null;
+	}
+}
+
+// Parse degree coordinate value (format: '2304.56556', 'S'), return as decimal -23.4204
+function parseCoordinate(value, orientation)
+{
+	//Get degrees and minutes from value
+	const degrees = parseInt(value.substring(0, value.indexOf('.') - 2));
+	const minutes = parseFloat(value.substring(value.indexOf('.') - 2));
+
+	// Convert to decimal
+	let decimal = degrees + minutes / 60;
+
+	// Check orientation
+	if(orientation === 'S' || orientation === 'W')
+	{
+		// Negative for south or west
+		decimal = decimal * -1;
+	}
+
+	return decimal;
+}
+
+// Calculate the distance between to GeoPoints
+function getDistance(coordinates1, coordinates2) 
+{
+	// Math.PI / 180
+	const p = 0.017453292519943295;
+
+	// Calculate distance
+	const a = 0.5 - 
+				Math.cos((coordinates2.latitude - coordinates1.latitude) * p)/2 + 
+				Math.cos(coordinates1.latitude * p) * Math.cos(coordinates2.latitude * p) * 
+				(1 - Math.cos((coordinates2.longitude - coordinates1.longitude) * p))/2;
+
+	// 2 * R; R = 6371 km
+	return 12742000 * Math.asin(Math.sqrt(a)); 
+}
+
 	 
 function getMNC(network)
 {

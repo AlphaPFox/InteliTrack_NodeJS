@@ -42,7 +42,7 @@ class TCP_Parser extends EventEmitter
 			delete this._connections[id];
 
 			//Emit disconnect
-			this.emit('data', { source: id, type: 'DISCONNECT'	});
+			this.emit('data', { source: id, type: 'DISCONNECTED' });
 		}
 	}
 
@@ -80,14 +80,9 @@ class TCP_Parser extends EventEmitter
 
 						//Reply connection to tracker
 						this.sendCommand(imei, "LOAD");
-						
-						//Call method to inform connection
-						this.emit('data',
-						{ 
-							source: imei, 
-							type: 'COBAN_PROTOCOL',
-							content: ["##", "connected"]
-						});
+										
+						//Emit connect message
+						this.emit('data', { source: imei, type: 'CONNECTED' });
 					}
 				}
 				else if(data.length == 16 && !isNaN(data.substring(0,15)))
@@ -130,6 +125,50 @@ class TCP_Parser extends EventEmitter
 					//Save on connection array
 					this.setConnection(suntech_id, conn);
 				}
+				else if(data.includes("BP00"))
+				{
+					//TK103_Protocol type
+					var tracker_id = data.substring(1, 13);
+
+					//Emit connect message
+					this.emit('data', { source: tracker_id, type: 'CONNECTED' });
+
+					//Save on connection array
+					this.setConnection(tracker_id, conn);
+
+					//Reply connection to tracker
+					this.sendCommand(tracker_id, "(" + tracker_id + "AP01HSO)");
+				}
+				else if(data.includes("BP05"))
+				{
+					//TK103_PRotocol type
+					var tracker_id = data.substring(1, 13);
+
+					//Emit connect message
+					this.emit('data', { source: tracker_id, type: 'CONNECTED' });
+
+					//Save on connection array
+					this.setConnection(tracker_id, conn);
+
+					//Reply connection to tracker
+					this.sendCommand(tracker_id, "(" + tracker_id + "AP05)");
+				}
+				else if(data.includes("BR00"))
+				{
+					//TK103_PRotocol type
+					var tracker_id = data.substring(1, 13);
+
+					//Call method to handle tcp data
+					this.emit('data',
+					{ 
+						source: tracker_id, 
+						type: 'TK103_PROTOCOL',
+						content: data
+					});
+
+					//Save on connection array
+					this.setConnection(tracker_id, conn);
+				}
 				else if(data.includes("CLIENT_AUTH"))
 				{
 					//Split data using ';' separator
@@ -139,15 +178,11 @@ class TCP_Parser extends EventEmitter
 					var client_id = content[2];
 
 					//Call method to handle tcp data
-					this.emit('data',
+					this.emit('client',
 					{ 
 						source: client_id, 
-						type: 'CLIENT_PROTOCOL',
 						content: content
-					});
-
-					//Save on connection array
-					this.setConnection(client_id, conn);
+					}, conn);
 				}
 				else if(data.length > 5)
 				{
