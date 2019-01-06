@@ -1016,7 +1016,7 @@ async function insert_coordinates(tracker: FirebaseFirestore.QueryDocumentSnapsh
 		const previousCoordinate = querySnapshot.docs[0];
 
 		// Check if this is the latest coordinate from this tracker
-		const new_coordinate = querySnapshot.empty || coordinate_params.datetime > tracker.data().lastCoordinate.datetime.toDate()
+		const new_coordinate = querySnapshot.empty || !tracker.data().lastCoordinate || coordinate_params.datetime > tracker.data().lastCoordinate.datetime.toDate()
 	
 		//Conditions to create a new coordinate entry no DB
 		//1 - No previous coordinate
@@ -1129,13 +1129,13 @@ async function insert_coordinates(tracker: FirebaseFirestore.QueryDocumentSnapsh
 		if(new_coordinate)
 		{
 			//Get updated datetime from coordinate params
-			const datetime = coordinate_params.datetime || coordinate_params.lastDatetime;
+			coordinate_params.datetime = coordinate_params.lastDatetime ? coordinate_params.lastDatetime : coordinate_params.datetime;
 
 			//Update tracker last coordinate field
 			await firestore
 				.collection('Tracker')
 				.doc(tracker.id)
-				.set({ lastCoordinate: { type: coordinate_params.type, location: coordinate_params.position, datetime: datetime }, lastUpdate: datetime}, { merge: true })
+				.set({lastCoordinate: coordinate_params, lastUpdate: new Date()}, { merge: true })
 
 			//Check if there is any pending configurations on this tracker
 			if(tracker.data().lastConfiguration && tracker.data().lastConfiguration.step === "PENDING" && tracker.data().model === "tk102")
