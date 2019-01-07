@@ -7,34 +7,20 @@ const logger = require(`./logger`);
 const Google_Services = require(`./google`);
 
 //Import local parsers
-const TCP_Module = require(`./parsers/tcp`);
 const SMS_Module = require(`./parsers/sms`);
 
-//Import client module
-const Client = require("./client")
-
 //Get process params
-const tcp_port = process.argv[2];;
-const com_port = process.argv[3];
-const server_name = process.argv[4];
+const com_port = process.argv[2];
+const server_name = process.argv[3];
 
 //Initialize Google services 
 const google_services = new Google_Services(`./functions/credentials.json`);
-
-//Initialize TCP Parser
-const tcp_parser = new TCP_Module(tcp_port);
-
-//Initialize local tcp message buffer
-const tcp_buffer = new Array();
 
 //Initialize SMS Parser
 const sms_parser = new SMS_Module(com_port);
 
 //Initialize local sms message buffer
 const sms_buffer = new Array();
-
-//Initialize clients array
-var clients = {};
 
 //Handle SMS comming from modem
 sms_parser.on(`data`, (sms_message) => 
@@ -59,48 +45,11 @@ sms_parser.on(`data`, (sms_message) =>
    sms_parser.deleteMessage(sms_message);	
 });
 
-//Handle data comming from TCP protocol
-tcp_parser.on(`data`, (tcp_message) => 
-{
-	//Call method to save data on Firestore
-	saveOnFirestore(`TCP_Inbox`, tcp_message, 
-	(success) => 
-	{
-		//On success, log info
-		logger.info(`TCP Message -> Stored to Firestore DB at: ${success.path}`);
-	},
-	(error) =>
-	{
-		//On error, log message
-		logger.error(`TCP Message -> Error saving on Firestore DB: ${error}`);
-
-		//Store message on local buffer
-		tcp_buffer.push(tcp_message);
-	});
-});
-
-//Handle client data comming from TCP protocol
-tcp_parser.on(`client`, (data, tcp_socket) => 
-{
-	//If client is not connected yet
-	if(!clients[data.source])
-	{
-		//Add new client to list
-		clients[data.source] = new Client(data.source, sms_parser);
-	}
-
-	//Update tcp_socket from client
-	clients[data.source].setConnection(tcp_socket);
-
-	//Call method to parse data
-	clients[data.source].parseData('tcp_data', data.content);
-});
-
 //Call method to check Firestore DB
 monitorFirestore();
 
-//Call method to check on local buffers every 30 seconds
-monitorBuffers();
+//Call method to check on SMS buffers 
+setInterval(checkBuffer, 30000, sms_buffer, 'SMS_Inbox');
 
 //Get a real time updates from Firestore DB -> Tracker collection
 function monitorFirestore()
@@ -224,21 +173,13 @@ function monitorFirestore()
 		});
 }
 
-function monitorBuffers()
-{
-	//Call method to check on TCP Buffer
-	setInterval(checkBuffer, 30000, tcp_buffer, 'TCP_Inbox');
-
-	//Call method to check on SMS buffers 
-	setInterval(checkBuffer, 30000, sms_buffer, 'SMS_Inbox');
-}
 
 function checkBuffer(buffer, collection)
 {
 	//Log regular function
 	logger.debug(`[${collection}] -> ${buffer.length == 0 ? `No` : buffer.length} messages on buffer`);
 
-	//If any messages available on TCP buffer
+	//If any messages available on buffer
 	if(buffer.length > 0)
 	{
 		//Call method to save data on Firestore

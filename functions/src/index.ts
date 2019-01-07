@@ -2,7 +2,9 @@ import * as functions from 'firebase-functions';
 import * as admin from 'firebase-admin';
 import * as node_geocoder from 'node-geocoder';
 import * as geolocation from 'bscoords';
+import * as nexmo_api from 'nexmo';
 import * as moment from 'moment';
+import * as util from 'util';
 
 //Initialize firebase admin service
 admin.initializeApp();
@@ -16,18 +18,201 @@ firestore.settings({timestampsInSnapshots: true});
 //Initialize geocoder service using google maps static api key
 const geocoder = node_geocoder({
 	provider: 'google',
-	apiKey: 'AIzaSyAq8QebBfeR7sVRKErHhmysSk5U80Zn3xE', // for Mapquest, OpenCage, Google Premier
+	apiKey: '', // for Mapquest, OpenCage, Google Premier
 });
 
 //Initialize geolocation API to get location from GSM Towers
 geolocation.init({
 	// API keys
-	apikey_opencellid: '9d604982096e3a', 
-	apikey_google: 'AIzaSyBBw803hHB7msBTnZ53YHdDWFPcJACIyCc',
+	apikey_opencellid: '', 
+	apikey_google: '',
 	timeout: 2000 // socket timeout in milliseconds
 });
 
-// Cloud function: Parse data received from a TCP server
+//Initialize Nexmo API
+const nexmo = new nexmo_api({
+	apiKey: '',
+	apiSecret: ''
+ });
+
+//Define sendSMS function 
+const sendSMS = util.promisify(nexmo.message.sendSms.bind(nexmo.message));
+
+// HTTP Cloud function: Parse SMS received, called by NEXMO api
+exports.smsReceived = functions.https.onRequest(async (req, res) => {
+
+	// Allow only POST requests.
+	if (req.method !== 'POST') 
+	{
+		//End method with error code
+		return res.status(403).send('Forbidden!');
+	}
+
+	//Log received SMS
+	console.log('Received SMS data', req.body);
+
+	try
+	{
+		//Check http post request format
+		if(req.body.text && req.body.msisdn && req.body.msisdn.length < 20)
+		{
+			//Search for tracker with the same phone number
+			const query = await firestore
+				.collection(`Tracker`)
+				.where(`phoneNumber`, `==`, req.body.msisdn.replace('55', ''))
+				.get()
+
+			//If tracker found
+			if(!query.empty)
+			{
+				//Get tracker reference
+				const tracker = query.docs[0];
+
+				//Remove null bytes from string
+				const sms_text = req.body.text.replace(/\0/g, ``).toLowerCase().trim();
+
+				//Check tracker model
+				if(tracker.data().model.startsWith('tk'))
+				{
+					//Parse TK (Coban) model SMS message
+					await parseCobanSMS(tracker, sms_text);
+					
+					//End method
+					return res.status(200).send('ok');
+				}
+				else
+				{
+					//Model unknown error
+					throw new Error(`Tracker model not supported yet`);
+				}
+			}
+			else
+			{
+				//Tracker not found error
+				throw new Error(`Tracker with this phone number not found`);
+			}
+		}
+		else
+		{
+			// Log error
+			throw new Error(`Invalid HTTP request format`);
+		}
+	}
+	catch(error)
+	{
+		// Log error
+		console.error(`Unable to parse message: ${error.message}`);
+
+		// End method
+		return res.status(200).send('error parsing');
+	}
+});
+
+// HTTP Cloud function: Parse SMS delivery report, called by NEXMO api
+exports.deliveryReport = functions.https.onRequest(async (req, res) => {
+
+	// Allow only POST requests.
+	if (req.method !== 'POST') 
+	{
+		//End method with error code
+		return res.status(403).send('Forbidden!');
+	}
+
+	//Log delivery report data
+	console.log('Received SMS delivery report', req.body);
+
+	try
+	{
+		//Check http post request format
+		if(req.body.msisdn &&  req.body.messageId && req.body.messageId.length < 20)
+		{
+			//Search for the most recent SMS with this reference
+			const query = await firestore
+				.collection(`SMS_Sent`)
+				.where(`messageId`, `==`, req.body.messageId)
+				.orderBy(`sent_time`, `desc`)
+				.limit(1)
+				.get()
+
+			//If SMS found
+			if(!query.empty)
+			{
+				//Get sms_sent reference
+				const sms_sent = query.docs[0];
+
+				//Update sms document
+				await sms_sent.ref.set(
+				{
+					delivery_status: req.body.status,
+					received_time: admin.firestore.FieldValue.serverTimestamp()
+				}, {merge: true});
+
+				//Get configuration related to this message
+				const configuration = await firestore.doc(sms_sent.data().configuration).get()
+
+				//If configuration not confirmed yet
+				if(configuration.exists && configuration.data().status.step !== 'SUCCESS')
+				{
+					//Check delivery report status
+					if(req.body.status === 'delivered')
+					{
+						//Log data
+						console.info(`Delivery report parsed - Configuration delivered`, configuration.data());
+
+						//Update configuration data
+						await configuration.ref.update(
+						{ 
+							'status.step': `RECEIVED`,
+							'status.description': `Configuração recebida pelo rastreador`,
+							'status.datetime': admin.firestore.FieldValue.serverTimestamp()
+						});
+					}
+					else
+					{
+						//Log data
+						console.info(`Delivery report parsed - Configuration not delivered`, configuration.data());
+
+						//Update configuration data
+						await configuration.ref.update(
+						{ 
+							'status.step': `ERROR`,
+							'status.description': `Configuração não recebida pelo rastreador`,
+							'status.datetime': admin.firestore.FieldValue.serverTimestamp()
+						});
+					}
+				}
+				else
+				{
+					//Log data
+					console.info(`Received delivery report from a confirmed configuration`, configuration);
+				}
+				
+				//End method
+				return res.status(200).send('ok');
+			}
+			else
+			{
+				//SMS not found error
+				throw new Error(`Delivery report from unknown sent SMS`);
+			}
+		}
+		else
+		{
+			// Log error
+			throw new Error(`Invalid HTTP request format`);
+		}
+	}
+	catch(error)
+	{
+		// Log error
+		console.error(`Unable to parse delivery report: ${error.message}`);
+
+		// End method
+		return res.status(200).send('error parsing');
+	}
+ });
+
+//Firestore cloud function: Parse data received from a TCP server
 exports.parseTCP = functions.firestore.document('TCP_Inbox/{messageId}').onCreate(async snapshot => 
 {
 	// Get TCP message data
@@ -217,278 +402,21 @@ exports.parseSMS = functions.firestore.document('SMS_Inbox/{messageId}').onCreat
 
             //Remove null bytes from string
             const sms_text = sms_message.text.replace(/\0/g, ``).toLowerCase().trim();
-            
-            //Check if text is response from a configuration
-            if(sms_text.startsWith(`begin `))
-            {
-               //Confirm configuration enabled
-               await confirmConfiguration(tracker, `Begin`, true, sms_text);
-            }
-            else if(sms_text.startsWith(`time `))
-            {
-               //Confirm configuration enabled
-               await confirmConfiguration(tracker, `TimeZone`, true, sms_text);
-            }
-            else if(!isNaN(sms_text))
-            {
-               //Confirm configuration enabled
-               await confirmConfiguration(tracker, `IMEI`, true, sms_text);
-            }
-            else if(sms_text.startsWith(`reset `))
-            {
-               //Confirm configuration enabled
-               await confirmConfiguration(tracker, `Reset`, true, sms_text);
-            }
-            else if(sms_text.startsWith(`apn `))
-            {
-               //Confirm configuration enabled
-               await confirmConfiguration(tracker, `AccessPoint`, true, sms_text);
-            }
-            else if(sms_text.startsWith(`user`))
-            {
-               //Confirm configuration enabled
-               await confirmConfiguration(tracker, `APNUserPass`, true, sms_text);
-            }
-            else if(sms_text.startsWith(`adminip `))
-            {
-               //Confirm configuration enabled
-               await confirmConfiguration(tracker, `AdminIP`, true, sms_text);
-            }
-            else if(sms_text.startsWith(`gprs `))
-            {
-               //Confirm configuration enabled
-               await confirmConfiguration(tracker, `GPRS`, true, sms_text);
-            }
-            else if(sms_text.startsWith(`less gprs on `))
-            {
-               //Confirm configuration enabled
-               await confirmConfiguration(tracker, `LessGPRS`, true, sms_text);
-            }
-            else if(sms_text.startsWith(`less gprs off `))
-            {
-               //Confirm configuration disabled
-               await confirmConfiguration(tracker, `LessGPRS`, false, sms_text);
-            }
-            else if(sms_text.startsWith(`sms `))
-            {
-               //Confirm configuration enabled
-               await confirmConfiguration(tracker, `SMS`, true, sms_text);
-            }
-            else if(sms_text.startsWith(`admin `))
-            {
-               //Confirm configuration enabled
-               await confirmConfiguration(tracker, `Admin`, true, sms_text);
-            }
-            else if(sms_text.startsWith(`noadmin `))
-            {
-               //Confirm configuration disabled
-               await confirmConfiguration(tracker, `Admin`, false, "ok");
-            }
-            else if(sms_text.includes(`phone number is not`))
-            {
-               //Confirm configuration disabled
-               await confirmConfiguration(tracker, `Admin`, false, `ok`);
-            }
-            else if(sms_text.startsWith(`sleep off`))
-            {
-               //Confirm configuration disabled
-               await confirmConfiguration(tracker, `Sleep`, false, sms_text);
-            }
-            else if(sms_text.startsWith(`sleep `))
-            {
-               //Confirm configuration enabled
-               await confirmConfiguration(tracker, `Sleep`, true, sms_text);
-            }
-            else if(sms_text.startsWith(`noschework `))
-            {
-               //Confirm configuration disabled
-               await confirmConfiguration(tracker, `Schedule`, false, sms_text);
-            }
-            else if(sms_text.startsWith(`schework `))
-            {
-               //Confirm configuration enabled
-               await confirmConfiguration(tracker, `Schedule`, true, sms_text);
-            }
-            else if(sms_text.startsWith(`nofix`))
-            {
-               //Confirm configuration disabled
-               await confirmConfiguration(tracker, `PeriodicUpdate`, false, sms_text);
-				}
-            else if(sms_text.startsWith(`t0`))
-            {
-               //Confirm configuration disabled
-               await confirmConfiguration(tracker, `Timer`, true, sms_text);
-            }
-            else if(sms_text.startsWith(`notn`))
-            {
-               //Confirm configuration disabled
-               await confirmConfiguration(tracker, `Timer`, false, sms_text);
-            }
-            else if(sms_text.startsWith(`noshock `))
-            {
-               //Confirm configuration disabled
-               await confirmConfiguration(tracker,`Shock`, false, sms_text);
-            }
-            else if(sms_text.startsWith(`shock `))
-            {
-               //Confirm configuration enabled
-               await confirmConfiguration(tracker,`Shock`, true, sms_text);
-            }
-            else if(sms_text.startsWith(`nomove `))
-            {
-               //Confirm configuration disabled
-               await confirmConfiguration(tracker, `Move`, false, sms_text);
-            }
-            else if(sms_text.startsWith(`move `))
-            {
-               //Confirm configuration enabled
-               await confirmConfiguration(tracker, `Move`, true, sms_text);
-            }
-            else if(sms_text.startsWith(`nospeed `))
-            {
-               //Confirm configuration disabled
-               await confirmConfiguration(tracker, `Speed`, false, sms_text);
-            }
-            else if(sms_text.startsWith(`speed `))
-            {
-               //Confirm configuration enabled
-               await confirmConfiguration(tracker, `Speed`, true, sms_text);
-            }
-            else if(sms_text.includes(`password err`))
-            {
-               //Confirm configuration ERROR
-               await confirmConfiguration(tracker, `Begin`, true, sms_text);
-            }
-            else if(sms_text.includes(`help me! ok!`))
-            {
-               //Confirm configuration enabled
-               console.info(`Successfully disabled SOS alert from: ${tracker.data().name}`);
-            }
-            else if(sms_text.includes(`low battery! ok!`))
-            {
-               //Confirm configuration enabled
-               console.info(`Successfully disabled low battery alert from: ${tracker.data().name}`); 
-            }
-            else if(sms_text.startsWith(`bat: `) || sms_text.startsWith(`gsm: `))
-            {
-               //Status check configuration successfully applied
-               await confirmConfiguration(tracker, `StatusCheck`, true, sms_text);
-               
-               //Log info
-               console.info(`Successfully parsed status message from: ${tracker.data().name}`);
-				}
-				else if(sms_text.indexOf("cid:") >= 0)
+				
+				//Check tracker model
+				if(tracker.data().model.startsWith('tk'))
 				{
-               //Log info
-					console.info(`Parsing SMS with GSM geolocation from: ${tracker.data().name}`);
+					//Parse TK (Coban) model SMS message
+					await parseCobanSMS(tracker, sms_text);
 					
-					//Get LAC from SMS text
-					const lac_index = sms_text.indexOf("lac:") + "lac:".length;
-					const lac = sms_text.substring(lac_index, sms_text.substring(lac_index).indexOf(" ") + lac_index);
-					
-					//Get CID from SMS text
-					const cid_index = sms_text.indexOf("cid:") + "cid:".length;
-					const cid = sms_text.substring(cid_index, sms_text.substring(cid_index).indexOf(" ") + cid_index);
-
-					//Use google service for geolocation
-					const coords = await geolocation.google('724', getMNC(tracker.data().network), lac, cid);
-					
-					//Create coordinates object
-					const coordinates = new admin.firestore.GeoPoint(coords.lat, coords.lon);
-
-					//Create notification alert if available on this message
-					const alert_notification = buildNotification(sms_text.substring(0, sms_text.indexOf("!")));
-					
-					//Insert coordinates on db with default notification
-					await insert_coordinates(tracker,
-					{
-						type: 'GSM',
-						speed: 'N/D',
-						batteryLevel: tracker.data().batteryLevel,
-						signalLevel: tracker.data().signalLevel,
-						datetime: new Date(),
-						position: coordinates
-					}, alert_notification);
-				}
-				else if(sms_text.indexOf("lac:") >= 0)
-				{
-               //Log info
-					console.info(`Parsing SMS with GSM geolocation from: ${tracker.data().name}`);
-					
-					//Get LAC from SMS text
-					const lac_index = sms_text.indexOf("lac:") + "lac:".length;
-					const lac = sms_text.substring(lac_index, sms_text.substring(lac_index).indexOf(" ") + lac_index);
-					
-					//Get CID from SMS text
-					const cid_index = sms_text.indexOf(lac) + lac.length;
-					const cid = sms_text.substring(cid_index + 1, sms_text.substring(cid_index).indexOf("\n") + cid_index);
-
-					//Use google service for geolocation
-					const coords = await geolocation.google('724', getMNC(tracker.data().network), parseInt(lac, 16), parseInt(cid, 16));
-					
-					//Create coordinates object
-					const coordinates = new admin.firestore.GeoPoint(coords.lat, coords.lon);
-
-					//Create notification alert if available on this message
-					const alert_notification = buildNotification(sms_text.substring(0, sms_text.indexOf("!")));
-					
-					//Insert coordinates on db with default notification
-					await insert_coordinates(tracker,
-					{
-						type: 'GSM',
-						speed: 'N/D',
-						batteryLevel: tracker.data().batteryLevel,
-						signalLevel: tracker.data().signalLevel,
-						datetime: new Date(),
-						position: coordinates
-					}, alert_notification);
-				}
-				else if(sms_text.indexOf("lat") >= 0 && !sms_text.startsWith("last:"))
-				{
-					//Log info
-					console.info(`Parsing SMS with GPS position from: ${tracker.data().name}`);
-
-					//Get latitude from SMS text
-					let index = sms_text.indexOf("lat:") + "lat:".length;
-					const latitude = sms_text.substring(index, sms_text.substring(index).indexOf(" ") + index);
-
-					//Get longitude from SMS text
-					index = sms_text.indexOf("long:") + "long:".length;
-					const longitude = sms_text.substring(index, sms_text.substring(index).indexOf(" ") + index);
-
-					//Get speed from SMS text
-					index = sms_text.indexOf("speed:") + "speed:".length;
-					const speed = sms_text.substring(index, sms_text.substring(index).indexOf(" ") + index);
-
-					//Get speed from SMS text
-					index = sms_text.indexOf("bat:") + "bat:".length;
-					const bat = sms_text.substring(index, sms_text.substring(index).indexOf("\n") + index);
-					
-					//Create coordinates object
-					const coordinates = new admin.firestore.GeoPoint(parseFloat(latitude), parseFloat(longitude));
-
-					//Create notification alert if available on this message
-					const alert_notification = buildNotification(sms_text.substring(0, sms_text.indexOf("!")));
-
-					//Insert coordinates on db
-					await insert_coordinates(tracker, 
-					{
-						type: "GPS",
-						batteryLevel: bat,
-						signalLevel: tracker.data().signalLevel,
-						datetime: new Date(),
-						position: coordinates,
-						speed: speed
-					}, alert_notification);
+					//End method
+					return null;
 				}
 				else
 				{
-					//Log warning
-					console.error("Unable to parse message from TK102B model:  " + sms_text);
+					//Model unknown error
+					throw new Error(`Tracker model not supported yet`);
 				}
-
-            //End method
-            return null;
          }
          else if(sms_message.client)
          {
@@ -646,30 +574,78 @@ exports.buildConfiguration = functions.firestore.document('Tracker/{trackerId}/C
 				//Check if phone number is available to send configuration
 				if(tracker.data().phoneNumber.replace(/\D/g,'').length === 11)
 				{
-					//Log data
-					console.info(`Scheduling SMS command [${configuration.name} -> '${command}] to tracker ${tracker.data().name}`);
-
-					//Create SMS to be sent by the server
-					const sms_reference = await firestore
-						.collection('SMS_Outbox')
-						.add(
-						{
-							command: command,
-							to: tracker.data().phoneNumber,
-							path: docSnapshot.after.ref.path,
-							datetime: admin.firestore.FieldValue.serverTimestamp()
-						})
-
-					//Set configuration scheduled status
-					configuration.status = 
+					try 
 					{
-						step: `SCHEDULED`,
-						description: `Aguardando para ser enviado ao rastreador`,
-						command: command,
-						datetime: admin.firestore.FieldValue.serverTimestamp(),
-						sms_reference: sms_reference.path,
-						finished: false
-					};
+						//Log data
+						console.info(`Sending SMS [${configuration.name} -> '${command}] to tracker ${tracker.data().name} using Nexmo API`);
+
+						//Try to send SMS using Nexmo API
+						const result = await sendSMS('5511953259255', `55${tracker.data().phoneNumber}`, command);
+
+						//Log data
+						console.info(`Result: `, result);
+					
+						//Check status
+						if(result.messages[0].status === '0')
+						{
+							//Save SMS on Sent collection
+							const sms_reference = await firestore.collection('SMS_Sent').add(
+							{
+								server: 'Nexmo API',
+								messageId: result.messages[0]['message-id'],
+								text: command,
+								configuration: docSnapshot.after.ref.path,
+								sent_time: admin.firestore.FieldValue.serverTimestamp(),
+								status: `SENT`
+							});
+
+							//Set configuration SENT status
+							configuration.status = 
+							{
+								step: `SENT`,
+								description: `Configuração enviada ao servidor`,
+								command: command,
+								datetime: admin.firestore.FieldValue.serverTimestamp(),
+								sms_reference: sms_reference.path,
+								finished: false
+							};
+							
+							//Log data
+							console.info(`SMS successfuly sent, stored at ${sms_reference.path}`);
+						}
+						else
+						{
+							//Error sending SMS
+							throw new Error(`Status: ${result.messages[0].status} / Message: ${result.messages[0]['error-text']}`);
+						}
+					} 
+					catch (error) 
+					{
+						// Log error
+						console.error(`Unable to sent using Nexmo API: ${error.message}, storing on SMS_Outbox collection`);
+						
+						//Create SMS to be sent by the server
+						const sms_reference = await firestore
+							.collection('SMS_Outbox')
+							.add(
+							{
+								command: command,
+								to: tracker.data().phoneNumber,
+								path: docSnapshot.after.ref.path,
+								datetime: admin.firestore.FieldValue.serverTimestamp()
+							})
+
+						//Set configuration scheduled status
+						configuration.status = 
+						{
+							step: `SCHEDULED`,
+							description: `Aguardando para ser enviado ao rastreador`,
+							command: command,
+							datetime: admin.firestore.FieldValue.serverTimestamp(),
+							sms_reference: sms_reference.path,
+							finished: false
+						};
+					}
 				}
 				else
 				{
@@ -729,6 +705,277 @@ exports.buildConfiguration = functions.firestore.document('Tracker/{trackerId}/C
 	}
 });
 
+async function parseCobanSMS(tracker, sms_text)
+{
+	//Check if text is response from a configuration
+	if(sms_text.startsWith(`begin `))
+	{
+		//Confirm configuration enabled
+		await confirmConfiguration(tracker, `Begin`, true, sms_text);
+	}
+	else if(sms_text.startsWith(`time `))
+	{
+		//Confirm configuration enabled
+		await confirmConfiguration(tracker, `TimeZone`, true, sms_text);
+	}
+	else if(!isNaN(sms_text))
+	{
+		//Confirm configuration enabled
+		await confirmConfiguration(tracker, `IMEI`, true, sms_text);
+	}
+	else if(sms_text.startsWith(`reset `))
+	{
+		//Confirm configuration enabled
+		await confirmConfiguration(tracker, `Reset`, true, sms_text);
+	}
+	else if(sms_text.startsWith(`apn `))
+	{
+		//Confirm configuration enabled
+		await confirmConfiguration(tracker, `AccessPoint`, true, sms_text);
+	}
+	else if(sms_text.startsWith(`user`))
+	{
+		//Confirm configuration enabled
+		await confirmConfiguration(tracker, `APNUserPass`, true, sms_text);
+	}
+	else if(sms_text.startsWith(`adminip `))
+	{
+		//Confirm configuration enabled
+		await confirmConfiguration(tracker, `AdminIP`, true, sms_text);
+	}
+	else if(sms_text.startsWith(`gprs `))
+	{
+		//Confirm configuration enabled
+		await confirmConfiguration(tracker, `GPRS`, true, sms_text);
+	}
+	else if(sms_text.startsWith(`less gprs on `))
+	{
+		//Confirm configuration enabled
+		await confirmConfiguration(tracker, `LessGPRS`, true, sms_text);
+	}
+	else if(sms_text.startsWith(`less gprs off `))
+	{
+		//Confirm configuration disabled
+		await confirmConfiguration(tracker, `LessGPRS`, false, sms_text);
+	}
+	else if(sms_text.startsWith(`sms `))
+	{
+		//Confirm configuration enabled
+		await confirmConfiguration(tracker, `SMS`, true, sms_text);
+	}
+	else if(sms_text.startsWith(`admin `))
+	{
+		//Confirm configuration enabled
+		await confirmConfiguration(tracker, `Admin`, true, sms_text);
+	}
+	else if(sms_text.startsWith(`noadmin `))
+	{
+		//Confirm configuration disabled
+		await confirmConfiguration(tracker, `Admin`, false, "ok");
+	}
+	else if(sms_text.includes(`phone number is not`))
+	{
+		//Confirm configuration disabled
+		await confirmConfiguration(tracker, `Admin`, false, `ok`);
+	}
+	else if(sms_text.startsWith(`sleep off`))
+	{
+		//Confirm configuration disabled
+		await confirmConfiguration(tracker, `Sleep`, false, sms_text);
+	}
+	else if(sms_text.startsWith(`sleep `))
+	{
+		//Confirm configuration enabled
+		await confirmConfiguration(tracker, `Sleep`, true, sms_text);
+	}
+	else if(sms_text.startsWith(`noschework `))
+	{
+		//Confirm configuration disabled
+		await confirmConfiguration(tracker, `Schedule`, false, sms_text);
+	}
+	else if(sms_text.startsWith(`schework `))
+	{
+		//Confirm configuration enabled
+		await confirmConfiguration(tracker, `Schedule`, true, sms_text);
+	}
+	else if(sms_text.startsWith(`nofix`))
+	{
+		//Confirm configuration disabled
+		await confirmConfiguration(tracker, `PeriodicUpdate`, false, sms_text);
+	}
+	else if(sms_text.startsWith(`t0`))
+	{
+		//Confirm configuration disabled
+		await confirmConfiguration(tracker, `Timer`, true, sms_text);
+	}
+	else if(sms_text.startsWith(`notn`))
+	{
+		//Confirm configuration disabled
+		await confirmConfiguration(tracker, `Timer`, false, sms_text);
+	}
+	else if(sms_text.startsWith(`noshock `))
+	{
+		//Confirm configuration disabled
+		await confirmConfiguration(tracker,`Shock`, false, sms_text);
+	}
+	else if(sms_text.startsWith(`shock `))
+	{
+		//Confirm configuration enabled
+		await confirmConfiguration(tracker,`Shock`, true, sms_text);
+	}
+	else if(sms_text.startsWith(`nomove `))
+	{
+		//Confirm configuration disabled
+		await confirmConfiguration(tracker, `Move`, false, sms_text);
+	}
+	else if(sms_text.startsWith(`move `))
+	{
+		//Confirm configuration enabled
+		await confirmConfiguration(tracker, `Move`, true, sms_text);
+	}
+	else if(sms_text.startsWith(`nospeed `))
+	{
+		//Confirm configuration disabled
+		await confirmConfiguration(tracker, `Speed`, false, sms_text);
+	}
+	else if(sms_text.startsWith(`speed `))
+	{
+		//Confirm configuration enabled
+		await confirmConfiguration(tracker, `Speed`, true, sms_text);
+	}
+	else if(sms_text.includes(`password err`))
+	{
+		//Confirm configuration ERROR
+		await confirmConfiguration(tracker, `Begin`, true, sms_text);
+	}
+	else if(sms_text.includes(`help me! ok!`))
+	{
+		//Confirm configuration enabled
+		console.info(`Successfully disabled SOS alert from: ${tracker.data().name}`);
+	}
+	else if(sms_text.includes(`low battery! ok!`))
+	{
+		//Confirm configuration enabled
+		console.info(`Successfully disabled low battery alert from: ${tracker.data().name}`); 
+	}
+	else if(sms_text.startsWith(`bat: `) || sms_text.startsWith(`gsm: `))
+	{
+		//Status check configuration successfully applied
+		await confirmConfiguration(tracker, `StatusCheck`, true, sms_text);
+		
+		//Log info
+		console.info(`Successfully parsed status message from: ${tracker.data().name}`);
+	}
+	else if(sms_text.indexOf("cid:") >= 0)
+	{
+		//Log info
+		console.info(`Parsing SMS with GSM geolocation from: ${tracker.data().name}`);
+		
+		//Get LAC from SMS text
+		const lac_index = sms_text.indexOf("lac:") + "lac:".length;
+		const lac = sms_text.substring(lac_index, sms_text.substring(lac_index).indexOf(" ") + lac_index);
+		
+		//Get CID from SMS text
+		const cid_index = sms_text.indexOf("cid:") + "cid:".length;
+		const cid = sms_text.substring(cid_index, sms_text.substring(cid_index).indexOf(" ") + cid_index);
+
+		//Use google service for geolocation
+		const coords = await geolocation.google('724', getMNC(tracker.data().network), lac, cid);
+		
+		//Create coordinates object
+		const coordinates = new admin.firestore.GeoPoint(coords.lat, coords.lon);
+
+		//Create notification alert if available on this message
+		const alert_notification = buildNotification(sms_text.substring(0, sms_text.indexOf("!")));
+		
+		//Insert coordinates on db with default notification
+		await insert_coordinates(tracker,
+		{
+			type: 'GSM',
+			speed: 'N/D',
+			batteryLevel: tracker.data().batteryLevel,
+			signalLevel: tracker.data().signalLevel,
+			datetime: new Date(),
+			position: coordinates
+		}, alert_notification);
+	}
+	else if(sms_text.indexOf("lac:") >= 0)
+	{
+		//Log info
+		console.info(`Parsing SMS with GSM geolocation from: ${tracker.data().name}`);
+		
+		//Get LAC from SMS text
+		const lac_index = sms_text.indexOf("lac:") + "lac:".length;
+		const lac = sms_text.substring(lac_index, sms_text.substring(lac_index).indexOf(" ") + lac_index);
+		
+		//Get CID from SMS text
+		const cid_index = sms_text.indexOf(lac) + lac.length;
+		const cid = sms_text.substring(cid_index + 1, sms_text.substring(cid_index).indexOf("\n") + cid_index);
+
+		//Use google service for geolocation
+		const coords = await geolocation.google('724', getMNC(tracker.data().network), parseInt(lac, 16), parseInt(cid, 16));
+		
+		//Create coordinates object
+		const coordinates = new admin.firestore.GeoPoint(coords.lat, coords.lon);
+
+		//Create notification alert if available on this message
+		const alert_notification = buildNotification(sms_text.substring(0, sms_text.indexOf("!")));
+		
+		//Insert coordinates on db with default notification
+		await insert_coordinates(tracker,
+		{
+			type: 'GSM',
+			speed: 'N/D',
+			batteryLevel: tracker.data().batteryLevel,
+			signalLevel: tracker.data().signalLevel,
+			datetime: new Date(),
+			position: coordinates
+		}, alert_notification);
+	}
+	else if(sms_text.indexOf("lat") >= 0 && !sms_text.startsWith("last:"))
+	{
+		//Log info
+		console.info(`Parsing SMS with GPS position from: ${tracker.data().name}`);
+
+		//Get latitude from SMS text
+		let index = sms_text.indexOf("lat:") + "lat:".length;
+		const latitude = sms_text.substring(index, sms_text.substring(index).indexOf(" ") + index);
+
+		//Get longitude from SMS text
+		index = sms_text.indexOf("long:") + "long:".length;
+		const longitude = sms_text.substring(index, sms_text.substring(index).indexOf(" ") + index);
+
+		//Get speed from SMS text
+		index = sms_text.indexOf("speed:") + "speed:".length;
+		const speed = sms_text.substring(index, sms_text.substring(index).indexOf(" ") + index);
+
+		//Get speed from SMS text
+		index = sms_text.indexOf("bat:") + "bat:".length;
+		const bat = sms_text.substring(index, sms_text.substring(index).indexOf("\n") + index);
+		
+		//Create coordinates object
+		const coordinates = new admin.firestore.GeoPoint(parseFloat(latitude), parseFloat(longitude));
+
+		//Create notification alert if available on this message
+		const alert_notification = buildNotification(sms_text.substring(0, sms_text.indexOf("!")));
+
+		//Insert coordinates on db
+		await insert_coordinates(tracker, 
+		{
+			type: "GPS",
+			batteryLevel: bat,
+			signalLevel: tracker.data().signalLevel,
+			datetime: new Date(),
+			position: coordinates,
+			speed: speed
+		}, alert_notification);
+	}
+	else
+	{
+		//Log warning
+		console.error("Unable to parse message from TK102B model:  " + sms_text);
+	}
+}
 
 async function parseCobanProtocol(tracker, tcp_message)
 {
@@ -776,7 +1023,17 @@ async function parseCobanProtocol(tracker, tcp_message)
 			console.info('Result', coords);
 
 			//Parse datetime (ex.: 181106115734)
-			const datetime = moment.utc(tcp_message.content[2], 'YYMMDDhhmmss').toDate();
+			let datetime = moment.utc(tcp_message.content[2], 'YYMMDDhhmmss').toDate();
+
+			//Get current date time
+			const currentDatetime = new Date();
+
+			//Check if datetime is valid
+			if(datetime.getTime() > currentDatetime.getTime() || currentDatetime.getTime() - datetime.getTime() / 86400000 > 365)
+			{
+				//Use current datetime
+				datetime = currentDatetime;
+			}
 
 			//Create coordinates object
 			const coordinates = new admin.firestore.GeoPoint(coords.lat, coords.lon);

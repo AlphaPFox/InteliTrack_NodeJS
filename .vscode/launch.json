@@ -10,7 +10,7 @@
             "console": "integratedTerminal",
             "name": "InteliTrack",
             "program": "${workspaceFolder}\\server.js",
-            "args": ["COM23", "BIP_DESKTOP" ]
+            "args": ["5001", "COM23", "BIP_DESKTOP" ]
         }
     ]
 }
