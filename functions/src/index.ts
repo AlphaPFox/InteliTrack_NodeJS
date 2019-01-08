@@ -120,7 +120,7 @@ exports.deliveryReport = functions.https.onRequest(async (req, res) => {
 
 	//Log delivery report data
 	console.log('Received SMS delivery report', req.body);
-
+	
 	try
 	{
 		//Check http post request format

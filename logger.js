@@ -1,13 +1,11 @@
 //Import log manager
 var winston = require('winston');
 
-//Import path manager
-var path = require('path');
-
 //Define application log format
 const logFormat = winston.format.combine
 (
-    winston.format.timestamp(),
+	 winston.format.timestamp(),
+	 winston.format.colorize(),
     winston.format.printf(function (info) 
     {
       const { timestamp, level, message, ...args} = info;
@@ -15,16 +13,24 @@ const logFormat = winston.format.combine
     })
 );
 
-winston.add(new winston.transports.Console(
-{ 
-   level: 'debug',
-   format: winston.format.combine(winston.format.colorize(), logFormat),
+const logger = winston.createLogger({
+	level: 'debug',
+   format: logFormat,
    handleExceptions: true,
-   stderrLevels: ["warn", "error"]
-}));
+	stderrLevels: ["warn", "error"],
+	transports: [
+	  //
+	  // - Write to all logs with level `info` and below to `debug.log` 
+	  // - Write all logs warnings and errors to `error.log`.
+	  //
+	  new winston.transports.Console(),
+	  new winston.transports.File({ filename: 'error.log', level: 'warn', maxsize: '2000000', maxFiles: 3, tailable: true }),
+	  new winston.transports.File({ filename: 'debug.log', maxsize: '2000000', maxFiles: 3, tailable: true })
+	]
+ });
 
-//Do not exit on error
-winston.exitOnError = false;
+//Do not exit on errorls
+logger.exitOnError = false;
 
 //Export winston logger
-module.exports = winston;
+module.exports = logger;
