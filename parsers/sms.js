@@ -19,10 +19,7 @@ class SMS_Parser extends EventEmitter
 		this._sms_sent = {};
 		
 		//Initialize SMS outbox array
-		this._sms_outbox = [];
-
-		//Initialize client array
-		this._clients = [];
+		this._sms_outbox = {};
 
 		//Save com port
 		this._com_port = com_port;
@@ -69,30 +66,24 @@ class SMS_Parser extends EventEmitter
 	}
 
 	//Get modem used to receive data
-	getSentSMS(sms_reference)
+	getSentSMS(reference)
 	{
 		//Return modem controller
-		return this._sms_sent[sms_reference];
+		return this._sms_sent[reference];
 	}
 	
 	//Append SMS to outbox list
-	requestSend(sms_data)
+	requestSend(reference, sms_data)
 	{
 		//Store SMS on send list
-		this._sms_outbox.push(sms_data);
+		this._sms_outbox[reference] = sms_data;
 	}
 
-	//Append client to list
-	setClient(phoneNumber, client)
+	//Remove command from list
+	removeCommand(reference)
 	{
-		//Save client
-		this._clients[phoneNumber] = client;
-	}
-
-	//Get client by phone number
-	getClient(phoneNumber)
-	{
-		return this._clients[phoneNumber];
+		//Delete command from list
+		delete this._sms_outbox[reference];
 	}
 
 	configureModem(modem)
@@ -203,13 +194,6 @@ class SMS_Parser extends EventEmitter
             }
 				else 
 				{
-					//Check if this can be from a client request
-					if(this.getClient(sms.sender))
-					{
-						//Send message to be parse by client
-						this.getClient(sms.sender).parseData("sms_received", sms);
-					}
-
 					//Call method to handle sms
 					this.emit('data', sms);
 				}
@@ -223,13 +207,6 @@ class SMS_Parser extends EventEmitter
 
             //Log output
 				logger.debug("DELIVERY REPORT", delivery_report);
-				
-				//Check if any client associated with this phone number
-				if(this.getClient(delivery_report.sender))
-            {
-					//Send message to be parse by client
-					this.getClient(delivery_report.sender).parseData("delivery_report", delivery_report);
-				}
 
 				//Call method to handle delivery report
 				this.emit('data', delivery_report);
@@ -339,25 +316,30 @@ class SMS_Parser extends EventEmitter
             this.configureModem(modem);
          }
 		}
+
+		//Get current command list
+		const pendingCommands = Object.keys(this._sms_outbox);
 		
 		//Check if any sms available to send
-		if(this._sms_outbox.length > 0)
+		if(pendingCommands.length > 0)
 		{
 			//Log data
 			logger.debug(`Sending SMS from outbox`);
 
-			//Get first SMS to send
-			const configuration_data = this._sms_outbox.shift();
+			//Get first available command to send
+			const configuration_data = this._sms_outbox[pendingCommands[0]];
 
-			//Send SMS to request command
+			//Send SMS command
 			this.sendSMS(configuration_data.to, configuration_data.command, configuration_data.callback);
+
+			//Remove sent command from list
+			delete this._sms_outbox[pendingCommands[0]];
 		}
   }
 
   //Delete SMS from modem memory
   deleteMessage(sms)
   {
-
     //Call modem to request sms delete
     this.getModem().deleteMessage(sms);
   }

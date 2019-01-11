@@ -19,31 +19,99 @@ class TCP_Parser extends EventEmitter
 		this._server = net.createServer();
 		this._tcp_port = tcp_port;
 		this._connections = {};
+		this._tcp_outbox = {};
 
 		//Initialize server
 		this.initialize();
 	}
-	 
-	getConnection(id)
+		 
+	getConnection(tracker_id)
 	{
 		//Return tcp socket if available
-		return this._connections[id];
+		return this._connections[tracker_id];
 	}
 
-	setConnection(id, connection)
+	setConnection(tracker_id, connection)
 	{
 		//Store tcp socket on connection array
-		this._connections[id] = connection;
+		this._connections[tracker_id] = connection;
 
-		//Store on disconnect method
-		connection.onDisconnect = () =>
+		//Check for disconnect callback
+		if(!connection.onDisconnect)
 		{
-			//Remove from connection array
-			delete this._connections[id];
+			//Store on disconnect method
+			connection.onDisconnect = () =>
+			{
+				//Remove from connection array
+				delete this._connections[tracker_id];
 
-			//Emit disconnect
-			this.emit('data', { source: id, type: 'DISCONNECTED' });
+				//Emit disconnect
+				this.emit('data', { source: tracker_id, type: 'DISCONNECTED' });
+			}
 		}
+
+		//Check pending commands for this tracker
+		this.checkPendingCommands(tracker_id);
+	}
+
+	getPendingCommands()
+	{
+		//Return tcp outbox list
+		return this._tcp_outbox;
+	}
+
+	//Append command to outbox list
+	requestSend(reference, configuration)
+	{
+		//Try to send command to tracker
+		const sent = this.sendCommand(configuration.to, configuration.command);
+
+		//Check if tracker was available
+		if(sent)
+		{
+			//Run command callback function
+			configuration.callback();
+		}
+		else
+		{
+			//Store TCP on send list
+			this._tcp_outbox[reference] = configuration;
+		}
+	}
+
+	//Check for pending commands
+	checkPendingCommands(tracker_id)
+	{
+		//For each pending commands
+		for(let reference in this._tcp_outbox)
+		{
+			//Get configuration data
+			const config = this._tcp_outbox[reference];
+
+			//If command available to this tracker
+			if(config.to === tracker_id)
+			{
+				//Try to send command
+				if(this.sendCommand(config.to, config.command))
+				{
+					//If sent, run command callback function
+					config.callback();
+
+					//Delete from command list
+					delete this._tcp_outbox[reference];
+				}
+
+				//End method to avoid sending multiple commands at once
+				return;
+			}
+		}
+	}
+
+	//Remove command from list
+	removeCommand(reference)
+	{
+		//Delete command from list
+		delete this._tcp_outbox[reference];
 	}
 
 	initialize()
@@ -81,7 +149,7 @@ class TCP_Parser extends EventEmitter
 						//Reply connection to tracker
 						this.sendCommand(imei, "LOAD");
 										
-						//Emit connect message
+						//Emit connect message 
 						this.emit('data', { source: imei, type: 'CONNECTED' });
 					}
 				}
@@ -90,6 +158,9 @@ class TCP_Parser extends EventEmitter
 					//Heartbeat packet, retrieve imei 
 					var imei = data.substring(0,15);
 
+					//Save on connection array
+					this.setConnection(imei, conn);
+
 					//Reply connection to tracker
 					this.sendCommand(imei, "ON");
 				}
@@ -97,6 +168,9 @@ class TCP_Parser extends EventEmitter
 				{
 					//Split data using ';' separator
 					var content = data.split(',');
+
+					//Save on connection array
+					this.setConnection(imei, conn);
 
 					//Call method to handle tcp data
 					this.emit('data',
@@ -108,7 +182,7 @@ class TCP_Parser extends EventEmitter
 				}
 				else if(data.includes("ST910"))
 				{
-					//Split data using ';' separator
+					//Split data using ';' separator 
 					var content = data.split(';');
 
 					//Retrieve tracker ID from message (last imei digits)
@@ -124,6 +198,13 @@ class TCP_Parser extends EventEmitter
 
 					//Save on connection array
 					this.setConnection(suntech_id, conn);
+         
+					//If emergency message type
+					if(content[1] === 'Emergency')
+					{
+						//Send acknowlegde command to tracker
+						this.sendCommand('ACK;' + suntech_id);
+					}
 				}
 				else if(data.includes("BP00"))
 				{
@@ -168,21 +249,6 @@ class TCP_Parser extends EventEmitter
 
 					//Save on connection array
 					this.setConnection(tracker_id, conn);
-				}
-				else if(data.includes("CLIENT_AUTH"))
-				{
-					//Split data using ';' separator
-					var content = data.split('_');
-
-					//Get client ID
-					var client_id = content[2];
-
-					//Call method to handle tcp data
-					this.emit('client',
-					{ 
-						source: client_id, 
-						content: content
-					}, conn);
 				}
 				else if(data.length > 5)
 				{
@@ -262,11 +328,6 @@ class TCP_Parser extends EventEmitter
             //Log warning
             logger.warn("Cannot send [" + command + "] to " + destination + " - Connection is no longer valid.");
          }
-      }
-      else
-      {
-         //Log warning
-         logger.warn("Cannot send [" + command + "] to " + destination + " - Not connected to this server.");
       }
 
       //Command not sent, return error

@@ -69,13 +69,21 @@ exports.smsReceived = functions.https.onRequest(async (req, res) => {
 				const tracker = query.docs[0];
 
 				//Remove null bytes from string
-				const sms_text = req.body.text.replace(/\0/g, ``).toLowerCase().trim();
+				const sms_text = req.body.text.replace(/\0/g, ``).trim();
 
 				//Check tracker model
 				if(tracker.data().model.startsWith('tk'))
 				{
 					//Parse TK (Coban) model SMS message
-					await parseCobanSMS(tracker, sms_text);
+					await parseCobanSMS(tracker, sms_text.toLowerCase());
+					
+					//End method
+					return res.status(200).send('ok');
+				}
+				else if(tracker.data().model === 'st940')
+				{
+					//Parse SUNTECH model SMS message
+					await parseSuntechProtocol(tracker, sms_text.split(';'));
 					
 					//End method
 					return res.status(200).send('ok');
@@ -272,6 +280,14 @@ exports.parseTCP = functions.firestore.document('TCP_Inbox/{messageId}').onCreat
 				//Message parsed successfully, remove from TCP_Inbox
 				return snapshot.ref.delete();
 			}
+			else if(tcp_message.type === 'SUNTECH_PROTOCOL')
+			{
+				//Try to parse COBAN PROTOCOL message
+				await parseSuntechProtocol(tracker, tcp_message.content);
+
+				//Message parsed successfully, remove from TCP_Inbox
+				return snapshot.ref.delete();
+			}
 			else
 			{
 				// Protocol not found
@@ -367,18 +383,7 @@ exports.parseSMS = functions.firestore.document('SMS_Inbox/{messageId}').onCreat
 				{
 					//Log data
 					console.info(`Received delivery report from a confirmed configuration`, configuration);
-
-					//End method
-					return null;
 				}
-			}
-         else if(sms_message.client)
-         {
-            //Log data
-				console.info(`Received delivery report from client testing - Auth:  ${sms_message.client}`);
-				
-            //End method
-            return null;
 			}
 			else
 			{
@@ -401,16 +406,18 @@ exports.parseSMS = functions.firestore.document('SMS_Inbox/{messageId}').onCreat
             const tracker = query.docs[0];
 
             //Remove null bytes from string
-            const sms_text = sms_message.text.replace(/\0/g, ``).toLowerCase().trim();
+            const sms_text = sms_message.text.replace(/\0/g, ``).trim();
 				
 				//Check tracker model
 				if(tracker.data().model.startsWith('tk'))
 				{
 					//Parse TK (Coban) model SMS message
-					await parseCobanSMS(tracker, sms_text);
-					
-					//End method
-					return null;
+					await parseCobanSMS(tracker, sms_text.toLowerCase());
+				}
+				else if(tracker.data().model === 'st940')
+				{
+					//Parse SUNTECH model SMS message
+					await parseSuntechProtocol(tracker, sms_text.split(';'));
 				}
 				else
 				{
@@ -418,20 +425,15 @@ exports.parseSMS = functions.firestore.document('SMS_Inbox/{messageId}').onCreat
 					throw new Error(`Tracker model not supported yet`);
 				}
          }
-         else if(sms_message.client)
-         {
-            //Log data
-				console.info(`Received SMS from client testing - Auth:  ${sms_message.client}`);
-
-            //End method
-            return null;
-			}
 			else
          {
             //Tracker not found error
 				throw new Error(`Tracker with this phone number not found`);
          }
 		}
+
+		//End method
+		return null;
 	} 
 	catch(error)
 	{
@@ -471,104 +473,143 @@ exports.buildConfiguration = functions.firestore.document('Tracker/{trackerId}/C
 				switch(configuration.name)
 				{
 					case `Begin`:
-						//GENERAL CONFIG: Initialize tracker
+						//COBAN PROTOCOL -> GENERAL CONFIG: Initialize tracker
 						command = `begin${tracker_password}`;
 						break;
 
 					case `TimeZone`:
-						//GENERAL CONFIG: Set timezone to 0
+						//COBAN PROTOCOL -> GENERAL CONFIG: Set timezone to 0
 						command = `time zone${tracker_password} 0`
 						break;
 
 					case `StatusCheck`:
-						//GENERAL CONFIG: Request tracker status	
+						//COBAN PROTOCOL -> GENERAL CONFIG: Request tracker status	
 						command = `check${tracker_password}`;
 						break;
 
 					case `IMEI`:
-						//GENERAL CONFIG: Request tracker IMEI
+						//COBAN PROTOCOL -> GENERAL CONFIG: Request tracker IMEI
 						command = `imei${tracker_password}`;
 						break;
 
 					case `Reset`:  
-						//GENERAL CONFIG: Request tracker to reset
+						//COBAN PROTOCOL -> GENERAL CONFIG: Request tracker to reset
 						command = `reset${tracker_password}`;
 						break;
 
 					case `AccessPoint`:
-						//COMMUNICATION CONFIG: Set APN
+						//COBAN PROTOCOL -> COMMUNICATION CONFIG: Set APN
 						command = `apn${tracker_password} ${configuration.value}`;
 						break;
 
 					case `APNUserPass`:
-						//COMMUNICATION CONFIG: Set APN user password
+						//COBAN PROTOCOL -> COMMUNICATION CONFIG: Set APN user password
 						command = `up${tracker_password} ${configuration.value}`;
 						break;
 
 					case `AdminIP`:
-						//COMMUNICATION CONFIG: Set server IP
-						command = `adminip${tracker_password} ${configuration.value ? configuration.value : `187.4.165.10 5001`}`;
+						//COBAN PROTOCOL -> COMMUNICATION CONFIG: Set server IP
+						command = `adminip${tracker_password} ${configuration.value ? configuration.value : `35.247.208.189 5001`}`;
 						break;
 						
 					case `GPRS`:
-						//COMMUNICATION CONFIG: Enable GPRS mode
+						//COBAN PROTOCOL -> COMMUNICATION CONFIG: Enable GPRS mode
 						command = `gprs${tracker_password}`;
 						break;
 						
 					case `LessGPRS`:
-						//COMMUNICATION CONFIG: Reduced GPRS mode
+						//COBAN PROTOCOL -> COMMUNICATION CONFIG: Reduced GPRS mode
 						command = `less gprs${tracker_password} ${configuration.enabled ? `on` : `off` }`;
 						break;
 						
 					case `SMS`:
-						//COMMUNICATION CONFIG: Enable SMS mode
+						//COBAN PROTOCOL -> OMMUNICATION CONFIG: Enable SMS mode
 						command = `sms${tracker_password}`;
 						break;
 						
 					case `Admin`:
-						//COMMUNICATION CONFIG: Set SMS administrator phone number
+						//COBAN PROTOCOL -> COMMUNICATION CONFIG: Set SMS administrator phone number
 						command = `${configuration.enabled ? `` : `no`}admin${tracker_password} ${configuration.value ? configuration.value : `67998035423`}`;
 						break;
 						
 					case `PeriodicUpdate`:
-						//OPERATION CONFIG: Set position update interval
+						//COBAN PROTOCOL -> OPERATION CONFIG: Set position update interval
 						command = configuration.enabled ? `${configuration.value}${tracker_password}` : `nofix${tracker_password}`;
 						break;
 						
 					case `Timer`:
-						//OPERATION CONFIG: Set position update interval (TK103 model)
+						//TK103 PROTOCOL -> OPERATION CONFIG: Set position update interval
 						command = configuration.enabled ? `${configuration.value}${tracker_password}` : `notn${tracker_password}`;
 						break;
 
 					case `Sleep`:
-						//OPERATION CONFIG: Set sleep mode
+						//COBAN PROTOCOL -> OPERATION CONFIG: Set sleep mode
 						command = configuration.enabled ? `sleep${tracker_password} ${configuration.value}` : `sleep${tracker_password} off`;
 						break;
 
 					case `Schedule`:
-						//Send SMS to configure shock alert
+						//COBAN PROTOCOL -> OPERATION CONFIG: Set schedule mode
 						command = configuration.enabled ? `schedule${tracker_password} ${configuration.value}` : `noschedule${tracker_password}`;
 						break;
 
 					case `Move`:
-						//Move out alert
+						//COBAN PROTOCOL -> ALERT CONFIG: Move out settings
 						command = configuration.enabled ? `move${tracker_password} ${configuration.value}`: `nomove${tracker_password}`;
 						break;
 						
 					case `Speed`:
-						//Speed limit alert
+						//COBAN PROTOCOL -> ALERT CONFIG: Overspeed settings
 						command = configuration.enabled ? `speed${tracker_password} ${configuration.value}` : `nospeed${tracker_password}`;
 						break;
 
 					case `Shock`:
-						//Send SMS to configure shock alert
+						//COBAN PROTOCOL -> ALERT CONFIG: Vibration settings
 						command = configuration.enabled ? `shock${tracker_password}`: `noshock${tracker_password}`;
+						break;
+
+					case `Network`:
+						//SUNTECH PROTOCOL -> Configure GSM network settings
+						const network = configuration.value.split(';');
+
+						//Build command based on user defined values
+						command = `ST910;NETWORK;${tracker.id};${network[0]};${network[1]};${network[2]};${network[3]};${network[4] ? network[4] : `35.247.208.189`};${network[5] ? network[5] : `5001`};;;1;187.4.165.10;5001`;
+						break;
+
+					case `Service`:
+						//SUNTECH PROTOCOL -> Configure service settings
+						const service = configuration.value.split(';');
+
+						//Build command based on user defined values
+						command = `ST910;SVC;${tracker.id};0;1;${service[0]};5;10;100;5;300;100;${service[1]}`;
+						break;
+
+					case `Report`:
+						//SUNTECH PROTOCOL -> Configure report settings
+						const report = configuration.value.split(';');
+
+						//Build command based on user defined values
+						command = `ST910;REPORT;${tracker.id};${report[0]};${report[1]};60;3;0.10`;
+						break;
+
+					case `Function`:
+						//SUNTECH PROTOCOL -> Configure report settings
+						const fcn = configuration.value.split(';');
+
+						//Build command based on user defined values
+						command = `ST910;FUNCTION;${tracker.id};${fcn[0]};${fcn[1]}`;
 						break;
 
 					default:
 						//Config unknown, send default
 						command = configuration.name + ` ` + configuration.value;
 						break;
+				}
+
+				//If document was previously scheduled, remove previous reference to avoid duplicates
+				if(docSnapshot.before.exists && docSnapshot.before.data().status.step === `SCHEDULED`)
+				{
+					//Remove previous command from outbox collection
+					await firestore.doc(docSnapshot.before.data().status.reference).delete();	
 				}
 
 				//Check if phone number is available to send configuration
@@ -589,7 +630,7 @@ exports.buildConfiguration = functions.firestore.document('Tracker/{trackerId}/C
 						if(result.messages[0].status === '0')
 						{
 							//Save SMS on Sent collection
-							const sms_reference = await firestore.collection('SMS_Sent').add(
+							const reference = await firestore.collection('SMS_Sent').add(
 							{
 								server: 'Nexmo API',
 								messageId: result.messages[0]['message-id'],
@@ -606,12 +647,12 @@ exports.buildConfiguration = functions.firestore.document('Tracker/{trackerId}/C
 								description: `Configuração enviada ao servidor`,
 								command: command,
 								datetime: admin.firestore.FieldValue.serverTimestamp(),
-								sms_reference: sms_reference.path,
+								reference: reference.path,
 								finished: false
 							};
 							
 							//Log data
-							console.info(`SMS successfuly sent, stored at ${sms_reference.path}`);
+							console.info(`SMS successfuly sent, stored at ${reference.path}`);
 						}
 						else
 						{
@@ -625,7 +666,7 @@ exports.buildConfiguration = functions.firestore.document('Tracker/{trackerId}/C
 						console.error(`Unable to sent using Nexmo API: ${error.message}, storing on SMS_Outbox collection`);
 						
 						//Create SMS to be sent by the server
-						const sms_reference = await firestore
+						const reference = await firestore
 							.collection('SMS_Outbox')
 							.add(
 							{
@@ -642,10 +683,37 @@ exports.buildConfiguration = functions.firestore.document('Tracker/{trackerId}/C
 							description: `Aguardando para ser enviado ao rastreador`,
 							command: command,
 							datetime: admin.firestore.FieldValue.serverTimestamp(),
-							sms_reference: sms_reference.path,
+							reference: reference.path,
 							finished: false
 						};
 					}
+				}
+				else if(tracker.data().model === 'st940')
+				{
+					//Log data
+					console.info(`Scheduling command [${configuration.name} -> '${command}] to tracker ${tracker.data().name} in TCP_Outbox - No phone number available`);
+
+					//Create TCP command to be sent when tracker connects
+					const reference = await firestore
+						.collection('TCP_Outbox')
+						.add(
+						{
+							to: tracker.id,
+							command: command,
+							path: docSnapshot.after.ref.path,
+							datetime: admin.firestore.FieldValue.serverTimestamp()
+						})
+
+					//Set configuration error status
+					configuration.status = 
+					{
+						step: `SCHEDULED`,
+						description: `Aguardando conexão com o servidor`,
+						command: command,
+						datetime: admin.firestore.FieldValue.serverTimestamp(),
+						reference: reference.path,
+						finished: false
+					};
 				}
 				else
 				{
@@ -674,8 +742,8 @@ exports.buildConfiguration = functions.firestore.document('Tracker/{trackerId}/C
 				//if configuration was SCHEDULED before and now is now CONFIRMED OR CANCELED
 				if(docSnapshot.before.data().status.step === `SCHEDULED` && (configuration.status.step === `CONFIRMED` || configuration.status.step === `CANCELED`))
 				{
-					//Remove SMS from outbox collection
-					await firestore.doc(configuration.status.sms_reference).delete();	
+					//Remove command from outbox collection
+					await firestore.doc(configuration.status.reference).delete();	
 				}
 				
 				//if configuration is no longer scheduled
@@ -688,8 +756,8 @@ exports.buildConfiguration = functions.firestore.document('Tracker/{trackerId}/C
 		}
 		else if(configuration.status.step === `SCHEDULED`)
 		{
-			//Configuration deleted - remove SMS from outbox collection
-			return firestore.doc(configuration.status.sms_reference).delete();		
+			//Configuration deleted - remove command from outbox collection
+			return firestore.doc(configuration.status.reference).delete();		
 		}
 		
 		//End method, no updates required
@@ -989,7 +1057,17 @@ async function parseCobanProtocol(tracker, tcp_message)
 		if(tcp_message.content[4] === 'F')
 		{
 			//Parse datetime (ex.: 181106115734)
-			const datetime = moment.utc(tcp_message.content[2].substring(0, 6) + tcp_message.content[5].substring(0, 6), 'YYMMDDhhmmss').toDate();
+			let datetime = moment.utc(tcp_message.content[2].substring(0, 6) + tcp_message.content[5].substring(0, 6), 'YYMMDDhhmmss').toDate();
+
+			//Get current date time
+			const currentDatetime = new Date();
+
+			//Check if datetime is valid
+			if(datetime.getTime() > currentDatetime.getTime() || currentDatetime.getTime() - datetime.getTime() / 86400000 > 365)
+			{
+				//Use current datetime
+				datetime = currentDatetime;
+			}
 
 			//Parse coordinate from degrees/minutes to a GeoPoint
 			const coordinates = new admin.firestore.GeoPoint(parseCoordinate(tcp_message.content[7], tcp_message.content[8]), parseCoordinate(tcp_message.content[9], tcp_message.content[10]));
@@ -1086,6 +1164,120 @@ async function parseCobanProtocol(tracker, tcp_message)
 		throw new Error('Unknown COBAN PROTOCOL data structure: Not enough fields.');
 	}
 }
+
+async function parseSuntechProtocol(tracker, data)
+{
+	// Log data
+	console.info(`Parsing message (SUNTECH PROTOCOL) received from tracker: ${tracker.data().name}`);
+
+	//"ST910;Emergency;696969;500;20180201;12:26:55;-23.076226;-054.206427;000.367;000.00;1;4.1;0;1;02;1865;c57704f358;724;18;-397;1267;255;3;25\r"
+	if(data[0] === "ST910" && (data[1] === 'Emergency' || data[1] === 'Alert' || data[1] === 'Location'))
+	{
+		//Parse datetime
+		const datetime =  moment.utc(data[4] + "-" + data[5], "YYYYMMDD-hh;mm;ss").toDate();
+		
+		//Parse speed
+		const speed = data[8];
+
+		//Get if GPS signal is fixed or not on this message
+		const coordinate_type = (data[10] === "1" ? "GPS" : "GSM");
+
+		//Battery level
+		const batteryLevel = Math.min(Math.max(((parseFloat(data[11]) - 3.45) * 140), 5), 100).toFixed(0) + '%';
+
+		//Parse coordinate from degrees/minutes to a GeoPoint
+		const coordinates = new admin.firestore.GeoPoint(parseFloat(data[6]), parseFloat(data[7]));
+		
+		//Define coordinates params to be inserted/updated
+		const coordinate_params = 
+		{
+			type: coordinate_type,
+			signalLevel: 'N/D',
+			batteryLevel: batteryLevel,
+			datetime: datetime,
+			position: coordinates,
+			speed: speed
+		}
+
+		//Get location status (GPS fixed or not)
+		if(coordinate_type === "GSM")
+		{
+			//Log data
+			console.info("Requesting geolocation from cell tower", data[(data[1] === 'Location' ? 17 : 16)]);
+
+			//Use google service for geolocation
+			const coords = await geolocation.google('724', getMNC(tracker.data().network), parseInt(data[(data[1] === 'Location' ? 17 : 16)].substring(4, 8), 16), parseInt(data[(data[1] === 'Location' ? 17 : 16)].substring(0, 4), 16));
+
+			//Create coordinates object
+			coordinate_params.position = new admin.firestore.GeoPoint(coords.lat, coords.lon);
+		}
+		
+		//Insert coordinates on DB
+		await insert_coordinates(tracker, coordinate_params, buildNotification((data[1] === 'Emergency' || data[1] === 'Alert' ? data[13] : '')));
+	}
+	else if(data[1] === 'Alive')
+	{
+		//Send notification to users subscribed on this topic
+		await sendNotification(tracker.id, 'Notify_Available', {
+			title: 'Conexão GPRS',
+			content: 'Rastreador conectado',
+			expanded: 'O rastreador se conectou ao servidor Intelitrack',
+			datetime: Date.now().toString()
+		});
+	}
+	else if(data[1] === 'RES')
+	{
+		//Tracker responded to a command previously sent
+		switch(data[2])
+		{
+			case 'ACK':
+				//Log commmand response
+				console.info("Tracker ST940@" + tracker.data().name + " confirmed acknowledge.");
+				break;
+
+			case 'REPORT':
+				//Confirm report configuration -> ST910;RES;REPORT;${tracker.id};${report[0]};${report[1]};;60;3;0.10;
+				await confirmSuntechConfig(tracker, 'Report', `${data[4]};${data[5]}`)
+				break;
+
+			case `SVC`:
+				//Confirm service configuration -> ST910;RES;SVC;${tracker.id};0;1;${service[0]};5;10;100;5;300;100;${service[1]}
+				await confirmSuntechConfig(tracker, 'Service', `${data[6]};${data[13]}`)
+				break;
+
+			case `FUNCTION`:
+				//Confirm functions configuration -> ST910;RES;FUNCTION;${tracker.id};${fcn[0]};${fcn[1]}
+				await confirmSuntechConfig(tracker, 'Function', `${data[4]};${data[5]}`)
+				break;
+
+			case `NETWORK`:
+				//Confirm network configuration -> ST910;RES;NETWORK;${tracker.id};${network[0]};${network[1]};${network[2]};${network[3]};${network[4] ? network[4] : `35.247.208.189`};${network[5] ? network[5] : `5001`};;;1;187.4.165.10;5001
+				await confirmSuntechConfig(tracker, 'Network', `${data[4]};${data[5]};${data[6]};${data[7]};${data[8].replace('35.247.208.189', '')};${data[9].replace('5001', '')}`)
+				break;			
+
+			case `PRESETALL`:
+				//Confirm multiple configurations (adds service to PRESET command)
+				await confirmSuntechConfig(tracker, 'Service', `${data[28]};${data[35]}`);
+
+			case `PRESET`:
+				//Confirm multiple configurations
+				await confirmSuntechConfig(tracker, 'Function', `${data[23]};${data[24]}`);
+				await confirmSuntechConfig(tracker, 'Report', `${data[17]};${data[18]}`);
+				await confirmSuntechConfig(tracker, 'Network', `${data[5]};${data[6]};${data[7]};${data[8]};${data[9].replace('35.247.208.189', '')};${data[10].replace('5001', '')}`);
+				break;
+
+			default:
+				//Log command
+				console.info("Received unrequested response from tracker");
+		}
+	}
+	else
+	{
+		//Unknown data received
+		console.error("Unknown data received from tracker", data);
+	}
+}
+
 
 async function parseTK103Protocol(tracker, tcp_message)
 {
@@ -1284,55 +1476,28 @@ async function insert_coordinates(tracker: FirebaseFirestore.QueryDocumentSnapsh
 			//Log data
 			console.info(`New coordinate from tracker: ${tracker.data().name} - Requesting geocode`);
 
-			//Try to geocode data
-			try
-			{
-				//Request reverse geocoding
-				const result = await geocoder.reverse({lat: coordinate_params.position.latitude, lon: coordinate_params.position.longitude});
-				
-				//Save geocoding result (textual address)
-				if(coordinate_params.type === 'GSM')
-				{
-					//Weak GPS signal, get only city name
-					coordinate_params.address = `${result[0].administrativeLevels.level2long}/${result[0].administrativeLevels.level1short} - Sinal GPS fraco, localização aproximada.`;
-				}
-				else
-				{
-					//Strong GPS signal, get full textual address
-					coordinate_params.address = result[0].formattedAddress;
-				}
-			}
-			catch(error)
-			{
-				//Error geocoding address
-				coordinate_params.address = 'Endereço próximo à coordenada não disponível.';
-								
-				//Log data
-				console.error('Error on reverse geocoding', error);
-			}
-			finally
-			{
-				//Insert coordinates with geocoded address
-				await firestore
-					.collection('Tracker/' + tracker.id + '/Coordinates')
-					.doc()
-					.set(coordinate_params)
+			//Get coordinate address
+			coordinate_params.address = await getTextualAddress(coordinate_params.position, coordinate_params.type);
 
-				//Log info
-				console.info(`Successfully parsed location message from: ${tracker.data().name} - Coordinate inserted`);
+			//Insert coordinates with geocoded address
+			await firestore
+				.collection('Tracker/' + tracker.id + '/Coordinates')
+				.add(coordinate_params)
 
-				//If this is a new coordinate and no alert notification
-				if(new_coordinate && !alert_notification)
+			//Log info
+			console.info(`Successfully parsed location message from: ${tracker.data().name} - Coordinate inserted`);
+
+			//If this is a new coordinate and no alert notification
+			if(new_coordinate && !alert_notification)
+			{
+				//Sending notification to users subscribed on this topic
+				await sendNotification(tracker.id, 'Notify_Move', 
 				{
-					//Sending notification to users subscribed on this topic
-					await sendNotification(tracker.id, 'Notify_Move', 
-					{
-						title: `${previousCoordinate === null ? 'Posição do rastreador disponível' : 'Notificação de movimentação'}`,
-						content: `${coordinate_params.type === 'GSM' ? '(Sinal de GPS fraco, localização aproximada)' : coordinate_params.address}`,
-						coordinates: `${coordinate_params.type === 'GSM' ? '(GSM)_' : '(GPS)_'}${coordinate_params.position.latitude},${coordinate_params.position.longitude}`,
-						datetime: Date.now().toString()
-					});
-				}
+					title: `${previousCoordinate === null ? 'Posição do rastreador disponível' : 'Notificação de movimentação'}`,
+					content: `${coordinate_params.type === 'GSM' ? '(Sinal de GPS fraco, localização aproximada)' : coordinate_params.address}`,
+					coordinates: `${coordinate_params.type === 'GSM' ? '(GSM)_' : '(GPS)_'}${coordinate_params.position.latitude},${coordinate_params.position.longitude}`,
+					datetime: Date.now().toString()
+				});
 			}
 		}
 		else
@@ -1350,7 +1515,12 @@ async function insert_coordinates(tracker: FirebaseFirestore.QueryDocumentSnapsh
 			if(previousCoordinate.data().type === 'GSM' && coordinate_params.type === 'GPS')
 			{
 				//Update text
-				coordinate_params.address = 'Sinal de GPS recuperado, localização do rastreador definida no mapa.';
+				coordinate_params.address = '(Sinal de GPS recuperado) - ' + await getTextualAddress(coordinate_params.position, 'GPS');
+			}
+			else
+			{
+				//Retrieve address from last coordinate
+				coordinate_params.address = previousCoordinate.data().address;
 			}
 
 			//Current coordinates is too close from previous, just update last coordinate
@@ -1407,6 +1577,103 @@ async function insert_coordinates(tracker: FirebaseFirestore.QueryDocumentSnapsh
 		//Log error
 		console.error('Error parsing TCP Message', error);
 	}	
+}
+
+//Reverse geocode coordinates, return aproximate address
+async function getTextualAddress(coordinates: admin.firestore.GeoPoint, type: string)
+{
+	//Try to geocode data
+	try
+	{
+		//Request reverse geocoding
+		const result = await geocoder.reverse({lat: coordinates.latitude, lon: coordinates.longitude});
+		
+		//Save geocoding result (textual address)
+		if(type === 'GSM')
+		{
+			//Weak GPS signal, get only city name
+			return `${result[0].administrativeLevels.level2long}/${result[0].administrativeLevels.level1short} - Sinal GPS fraco, localização aproximada.`;
+		}
+		else
+		{
+			//Strong GPS signal, get full textual address
+			return result[0].formattedAddress;
+		}
+	}
+	catch(error)
+	{
+		//Log data
+		console.error('Error on reverse geocoding', error);
+
+		//Error geocoding address
+		return 'Endereço próximo à coordenada não disponível.';
+	}
+}
+
+async function confirmSuntechConfig(tracker: FirebaseFirestore.QueryDocumentSnapshot, configName: string, configValue: string)
+{
+	//Get configuration reference by name
+	const config_reference = await tracker.ref.collection(`Configurations`).doc(configName).get();
+
+	//If configuration found
+	if(config_reference.exists)
+	{
+		//Get configuration data
+		const config = config_reference.data();
+
+		//Check if tracker has a different configuration
+		if(config.value.trim() !== configValue.trim())
+		{
+			//Check if configuration was sent to this tracker
+			if(config.status.step === 'SENT' || config.status.step === 'RECEIVED')
+			{
+				//Log data
+				console.error(`Current configuration values on ${configName}@${tracker.data().name} does not match sent '${config.value}' != '${configValue}' configuration.`);
+
+				//Change configuration status
+				config.status.finished = false;
+				config.status.datetime = admin.firestore.FieldValue.serverTimestamp();
+
+				//Show success message to user
+				config.status.step = `ERROR`;
+				config.status.description = `Configuração não confirmada pelo rastreador`;
+
+				//Update configuration status on firestore DB
+				await config_reference.ref.set(config);
+			}
+			else
+			{
+				//Log data
+				console.info(`Current configuration ${configName} on tracker ${tracker.data().name} does not match values waiting to be sent.`, config.value, configValue);
+			}
+		}
+		else if(!config.status.finished)
+		{
+			//Change configuration status
+			config.status.finished = true;
+			config.status.datetime = admin.firestore.FieldValue.serverTimestamp();
+
+			//Show success message to user
+			config.status.step = `SUCCESS`;
+			config.status.description = `Configuração confirmada pelo rastreador`;
+
+			//Log data
+			console.info(`Confirmed configuration ${configName} on tracker ${tracker.data().name}`, config);
+
+			//Update configuration status on firestore DB
+			await config_reference.ref.set(config);
+		}
+		else
+		{
+			//Log data
+			console.info(`Configuration ${configName} already confirmed on tracker ${tracker.data().name}`, config);
+		}
+	}
+	else
+	{
+		//Log data
+		console.error(`Configuration ${configName} not found on tracker ${tracker.data().name}`);
+	}
 }
 
 async function confirmConfiguration(tracker: FirebaseFirestore.QueryDocumentSnapshot, configName: string, enabled: boolean, response: string)
@@ -1626,7 +1893,53 @@ function buildNotification(messageType: string)
 				content: `O motor do veículo foi desligado`,
 				datetime: Date.now().toString()
 			};
-		
+
+      case "1":
+		{
+			//SUNTECH: Shock emergency alert
+			return {
+				topic: 'Notify_Alert',
+				title: 'Alerta de vibração',
+				content: 'Vibração detectada pelo dispositivo'
+			}
+		}
+
+		case "2":
+		{
+			//SUNTECH: SOS button pressed
+			return {
+				topic: 'Notify_SOS',
+				title: 'Alerta de emergência (SOS)',
+				content: 'Botão de SOS pressionado no dispositivo'
+			};
+		}
+		case "56":
+		{
+			//SUNTECH: Magnet alert
+			return {
+				topic: 'Notify_Alert',
+				title: 'Alerta de magnetismo',
+				content: 'Base magnética próxima ao dispositivo'
+			};
+		}
+		case "57":
+		{
+			//SUNTECH: Magnet alert
+			return {
+				topic: 'Notify_Alert',
+				title: 'Alerta de magnetismo',
+				content: 'Base magnética removida do dispositivo'
+			};
+		}
+		case "58":
+		{
+			//SUNTECH: Battery alert
+			return {
+				topic: 'Notify_Alert',
+				title: 'Alerta de bateria fraca',
+				content: 'Nível de bateria abaixo do ideal'
+			};
+		}
 		default:
 			return null;
 	}
