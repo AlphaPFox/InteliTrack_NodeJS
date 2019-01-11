@@ -63,20 +63,8 @@ class TCP_Parser extends EventEmitter
 	//Append command to outbox list
 	requestSend(reference, configuration)
 	{
-		//Try to send command to tracker
-		const sent = this.sendCommand(configuration.to, configuration.command);
-
-		//Check if tracker was available
-		if(sent)
-		{
-			//Run command callback function
-			configuration.callback();
-		}
-		else
-		{
-			//Store TCP on send list
-			this._tcp_outbox[reference] = configuration;
-		}
+		//Store TCP on send list
+		this._tcp_outbox[reference] = configuration;
 	}
 
 	//Check for pending commands
